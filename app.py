@@ -8,21 +8,20 @@ from zipfile import ZipFile
 import tempfile
 import os
 import fiona
+from shapely.geometry import LineString, MultiLineString, GeometryCollection
 
-# --------------------------------------------
-# CONFIGURACIÓN
-# --------------------------------------------
+# -------------------------------
+# CONFIG
+# -------------------------------
 st.set_page_config(page_title="Dashboard Ingeniería FTTH", layout="wide")
 st.title("📶 Dashboard Ingeniería FTTH")
-st.markdown("**Visualización de red, NAPs, HUBs, FOSC, NODOS y clientes simulados**")
+st.markdown("**Visualización del tendido, HUB, NAP, FOSC, NODOS y clientes simulados**")
 
-# --------------------------------------------
-# CARGA KMZ/KML
-# --------------------------------------------
-uploaded_file = st.file_uploader("📂 Subí el archivo del proyecto FTTH (.KMZ o .KML)", type=["kmz", "kml"])
-
+# -------------------------------
+# FUNCIONES
+# -------------------------------
 def leer_kmz(uploaded_file):
-    """Lee todas las capas de un KMZ/KML y devuelve un GeoDataFrame combinado."""
+    """Lee todas las capas de un KMZ/KML, incluyendo geometrías complejas."""
     with tempfile.TemporaryDirectory() as tmpdir:
         path = os.path.join(tmpdir, uploaded_file.name)
         with open(path, "wb") as f:
@@ -49,48 +48,61 @@ def leer_kmz(uploaded_file):
             return pd.concat(all_layers, ignore_index=True)
         return None
 
-# --------------------------------------------
-# MAPA
-# --------------------------------------------
+
+def extraer_lineas(geom):
+    """Devuelve una lista de LineString válidas desde geometrías mixtas."""
+    lineas = []
+    if geom is None or geom.is_empty:
+        return lineas
+    try:
+        if isinstance(geom, LineString):
+            lineas.append(geom)
+        elif isinstance(geom, MultiLineString):
+            lineas.extend(list(geom.geoms))
+        elif isinstance(geom, GeometryCollection):
+            for g in geom.geoms:
+                lineas.extend(extraer_lineas(g))
+    except Exception:
+        pass
+    return lineas
+
+
+# -------------------------------
+# APP
+# -------------------------------
+uploaded_file = st.file_uploader("📂 Subí el archivo FTTH (.KMZ o .KML)", type=["kmz", "kml"])
+
 if uploaded_file:
     gdf = leer_kmz(uploaded_file)
     if gdf is None or gdf.empty:
-        st.error("❌ No se encontraron geometrías válidas en el archivo.")
+        st.error("❌ No se encontraron geometrías válidas.")
         st.stop()
 
-    st.success(f"✅ Archivo {uploaded_file.name} cargado correctamente")
-
+    st.success(f"✅ Archivo {uploaded_file.name} cargado correctamente.")
     capas = gdf["layer"].unique()
     st.write("Capas detectadas:", list(capas))
 
     map_fig = go.Figure()
     all_lat, all_lon = [], []
 
-    # Colores por tipo
-    colores = {"TRONCAL": "red", "DERIV": "green", "PRECO": "violet"}
+    # Colores definidos
+    color_lineas = {"TRONCAL": "red", "DERIV": "green", "PRECO": "violet"}
+    color_puntos = {
+        "HUB": "blue",
+        "NAP": "red",
+        "FOSC": "black",
+        "NODOS": "yellow"
+    }
 
-    # --- LINEAS ---
+    # --- DIBUJAR LÍNEAS ---
     for tipo in ["TRONCAL", "DERIV", "PRECO"]:
-        subset = gdf[gdf["layer"].str.contains(tipo)]
+        subset = gdf[gdf["layer"].str.contains(tipo, case=False, na=False)]
         if subset.empty:
             continue
         for _, row in subset.iterrows():
-            geom = row.geometry
-            if geom is None or geom.is_empty:
-                continue
-            if geom.geom_type == "LineString":
-                lon, lat = geom.xy
-                if len(lat) == 0 or len(lon) == 0:
-                    continue
-                all_lat.extend(lat)
-                all_lon.extend(lon)
-                map_fig.add_trace(go.Scattermapbox(
-                    lon=lon, lat=lat, mode="lines",
-                    line=dict(width=3, color=colores[tipo]),
-                    name=tipo
-                ))
-            elif geom.geom_type == "MultiLineString":
-                for g in geom.geoms:
+            geoms = extraer_lineas(row.geometry)
+            for g in geoms:
+                try:
                     lon, lat = g.xy
                     if len(lat) == 0 or len(lon) == 0:
                         continue
@@ -98,21 +110,16 @@ if uploaded_file:
                     all_lon.extend(lon)
                     map_fig.add_trace(go.Scattermapbox(
                         lon=lon, lat=lat, mode="lines",
-                        line=dict(width=3, color=colores[tipo]),
+                        line=dict(width=3, color=color_lineas.get(tipo, "gray")),
                         name=tipo
                     ))
+                except Exception:
+                    continue
 
-    # --- PUNTOS ---
+    # --- DIBUJAR PUNTOS ---
     nap_coords = []
-    iconos = {
-        "HUB": {"color": "blue", "size": 12},
-        "NAP": {"color": "red", "size": 12},
-        "FOSC": {"color": "black", "size": 10},
-        "NODOS": {"color": "yellow", "size": 14}
-    }
-
     for tipo in ["HUB", "NAP", "FOSC", "NODOS"]:
-        subset = gdf[gdf["layer"].str.contains(tipo)]
+        subset = gdf[gdf["layer"].str.contains(tipo, case=False, na=False)]
         if subset.empty:
             continue
         try:
@@ -129,7 +136,7 @@ if uploaded_file:
             lat=subset["lat"],
             lon=subset["lon"],
             mode="markers",
-            marker=dict(size=iconos[tipo]["size"], color=iconos[tipo]["color"]),
+            marker=dict(size=12, color=color_puntos[tipo]),
             name=tipo
         ))
         if tipo == "NAP":
@@ -167,6 +174,5 @@ if uploaded_file:
         )
 
     st.plotly_chart(map_fig, use_container_width=True)
-
 else:
-    st.info("Subí un archivo KMZ o KML con estructura FTTH para visualizar.")
+    st.info("Subí un archivo KMZ/KML con estructura FTTH (TRONCAL, DERIV, PRECO, HUB, NAP, FOSC, NODOS).")
