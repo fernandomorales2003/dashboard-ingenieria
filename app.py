@@ -1,135 +1,170 @@
 import streamlit as st
-import zipfile
-import tempfile
 import pandas as pd
 import plotly.graph_objects as go
-import xml.etree.ElementTree as ET
-import random
-import os
+import tempfile, zipfile, os, xmltodict, random
 
 st.set_page_config(page_title="Dashboard Ingeniería FTTH", layout="wide")
-
 st.title("📡 Dashboard Ingeniería FTTH")
-st.markdown("Subí el archivo `.kmz` o `.kml` para visualizar la red y sus componentes principales.")
+st.markdown("Subí tu archivo `.kmz`, `.kml` o `.rtf` para visualizar el plano de ingeniería con sus troncales, derivaciones, HUB, NAP, etc.")
 
-uploaded_file = st.file_uploader("📁 Subir archivo KMZ/KML", type=["kmz", "kml"])
+uploaded_file = st.file_uploader("📁 Subir archivo", type=["kmz", "kml", "rtf"])
 
-def parse_kml(file_path):
-    tree = ET.parse(file_path)
-    root = tree.getroot()
-    ns = {'kml': 'http://www.opengis.net/kml/2.2', 'gx': 'http://www.google.com/kml/ext/2.2'}
+def extract_kml(uploaded_file):
+    """Extrae el texto KML desde KMZ, KML o RTF"""
+    temp = tempfile.NamedTemporaryFile(delete=False)
+    temp.write(uploaded_file.read())
+    temp.flush()
+    path = temp.name
 
-    troncales, fosc, nodos = [], [], []
+    if uploaded_file.name.endswith(".kmz"):
+        with zipfile.ZipFile(path, "r") as kmz:
+            for name in kmz.namelist():
+                if name.endswith(".kml"):
+                    extracted_path = os.path.join(tempfile.gettempdir(), name)
+                    kmz.extract(name, tempfile.gettempdir())
+                    return extracted_path
+    elif uploaded_file.name.endswith(".kml"):
+        return path
+    elif uploaded_file.name.endswith(".rtf"):
+        # Extraer el contenido KML desde un RTF exportado
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+        start = content.find("<kml")
+        end = content.rfind("</kml>")
+        if start != -1 and end != -1:
+            kml_text = content[start:end+6]
+            kml_path = path + ".kml"
+            with open(kml_path, "w", encoding="utf-8") as f:
+                f.write(kml_text)
+            return kml_path
+    return None
 
-    for placemark in root.iterfind(".//kml:Placemark", ns):
-        name_tag = placemark.find("kml:name", ns)
-        name = name_tag.text if name_tag is not None else "Sin nombre"
+def parse_kml(kml_path):
+    """Lee el KML y clasifica coordenadas por capa"""
+    with open(kml_path, "r", encoding="utf-8") as f:
+        kml_dict = xmltodict.parse(f.read())
 
-        line = placemark.find(".//kml:LineString/kml:coordinates", ns)
-        point = placemark.find(".//kml:Point/kml:coordinates", ns)
+    capas = {"TRONCALES": [], "DERIVACION": [], "PRECON": [], "HUB": [], "NAP": [], "FOSC": [], "NODOS": []}
 
-        if line is not None:
-            coords = [list(map(float, c.split(",")[:2])) for c in line.text.strip().split()]
-            troncales.append(coords)
-        elif point is not None:
-            coord = list(map(float, point.text.strip().split(",")[:2]))
-            if "FOSC" in name.upper():
-                fosc.append(coord)
-            elif "NOC" in name.upper() or "SHELTER" in name.upper():
-                nodos.append(coord)
+    def recorrer(node, current_folder=None):
+        if isinstance(node, dict):
+            if "Folder" in node:
+                folders = node["Folder"] if isinstance(node["Folder"], list) else [node["Folder"]]
+                for f in folders:
+                    nombre = f.get("name", "").upper()
+                    recorrer(f, nombre)
+            if "Placemark" in node:
+                placemarks = node["Placemark"] if isinstance(node["Placemark"], list) else [node["Placemark"]]
+                for p in placemarks:
+                    coords = None
+                    if "LineString" in p and "coordinates" in p["LineString"]:
+                        coords = p["LineString"]["coordinates"]
+                        tipo = current_folder or "TRONCALES"
+                    elif "Point" in p and "coordinates" in p["Point"]:
+                        coords = p["Point"]["coordinates"]
+                        tipo = current_folder or "NODOS"
+                    else:
+                        continue
 
-    return troncales, fosc, nodos
+                    # Normalizar coordenadas
+                    if coords:
+                        coords = [list(map(float, c.split(",")[:2])) for c in coords.strip().split()]
+                        if tipo:
+                            tipo_key = next((k for k in capas.keys() if k in tipo.upper()), None)
+                            if tipo_key:
+                                capas[tipo_key].append(coords)
 
-if uploaded_file is not None:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".kml") as tmp:
-        if uploaded_file.name.endswith(".kmz"):
-            with zipfile.ZipFile(uploaded_file, "r") as kmz:
-                for file in kmz.namelist():
-                    if file.endswith(".kml"):
-                        kmz.extract(file, tmp.name.replace(".kml", ""))
-                        file_path = os.path.join(tmp.name.replace(".kml", ""), file)
-                        break
-        else:
-            tmp.write(uploaded_file.read())
-            file_path = tmp.name
+    recorrer(kml_dict)
+    return capas
 
-    troncales, fosc, nodos = parse_kml(file_path)
+if uploaded_file:
+    kml_path = extract_kml(uploaded_file)
+    if not kml_path:
+        st.error("No se pudo extraer el KML del archivo.")
+        st.stop()
 
-    # Crear NAPs simuladas cerca de FOSC
-    naps = []
-    for fx, fy in fosc:
-        for _ in range(random.randint(1, 3)):
-            naps.append([fx + random.uniform(-0.0003, 0.0003), fy + random.uniform(-0.0003, 0.0003)])
+    capas = parse_kml(kml_path)
+    all_coords = [pt for lista in capas.values() for seg in lista for pt in seg]
+    if not all_coords:
+        st.error("No se encontraron coordenadas válidas en el archivo.")
+        st.stop()
 
-    # Crear clientes simulados cerca de NAPs
-    clientes = []
-    potencias = []
-    for nx, ny in naps:
-        for _ in range(random.randint(3, 8)):
-            cx = nx + random.uniform(-0.00015, 0.00015)
-            cy = ny + random.uniform(-0.00015, 0.00015)
-            clientes.append([cx, cy])
-            potencias.append(round(random.uniform(-25, -17), 2))
+    lon_center = sum(p[0] for p in all_coords) / len(all_coords)
+    lat_center = sum(p[1] for p in all_coords) / len(all_coords)
 
-    all_coords = [c for t in troncales for c in t] + fosc + nodos + naps
-    lon_center = sum(c[0] for c in all_coords) / len(all_coords)
-    lat_center = sum(c[1] for c in all_coords) / len(all_coords)
+    # Simular NAP y clientes
+    naps = capas["NAP"]
+    if naps:
+        clientes = []
+        potencias = []
+        for nap in naps:
+            for (x, y) in nap:
+                for _ in range(random.randint(3, 8)):
+                    cx = x + random.uniform(-0.0002, 0.0002)
+                    cy = y + random.uniform(-0.0002, 0.0002)
+                    clientes.append([cx, cy])
+                    potencias.append(round(random.uniform(-25, -17), 2))
+    else:
+        clientes, potencias = [], []
 
-    # Métricas superiores
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Troncales", len(troncales))
-    c2.metric("FOSC", len(fosc))
-    c3.metric("NODOS", len(nodos))
-    c4.metric("NAPs simuladas", len(naps))
-    c5.metric("Clientes simulados", len(clientes))
+    # ---- Resumen Superior ----
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+    c1.metric("Troncales", len(capas["TRONCALES"]))
+    c2.metric("Derivaciones", len(capas["DERIVACION"]))
+    c3.metric("Precon", len(capas["PRECON"]))
+    c4.metric("HUB", len(capas["HUB"]))
+    c5.metric("NAP", len(capas["NAP"]))
+    c6.metric("FOSC", len(capas["FOSC"]))
+    c7.metric("Clientes", len(clientes))
 
-    # Crear el mapa
+    # ---- Crear mapa ----
     fig = go.Figure()
 
-    for traza in troncales:
-        lon, lat = zip(*traza)
-        fig.add_trace(go.Scattermapbox(
-            lon=lon, lat=lat, mode="lines",
-            line=dict(width=3, color="red"),
-            name="Troncal"
-        ))
+    colores = {
+        "TRONCALES": "red",
+        "DERIVACION": "orange",
+        "PRECON": "purple",
+        "HUB": "blue",
+        "NAP": "violet",
+        "FOSC": "yellow",
+        "NODOS": "gray"
+    }
 
-    if fosc:
-        lon, lat = zip(*fosc)
-        fig.add_trace(go.Scattermapbox(
-            lon=lon, lat=lat, mode="markers",
-            marker=dict(size=10, color="blue", symbol="square"),
-            name="FOSC"
-        ))
+    # Líneas
+    for tipo, segmentos in capas.items():
+        for seg in segmentos:
+            if len(seg) > 1:
+                lon, lat = zip(*seg)
+                fig.add_trace(go.Scattermapbox(
+                    lon=lon, lat=lat, mode="lines",
+                    line=dict(width=3 if tipo == "TRONCALES" else 2, color=colores[tipo]),
+                    name=tipo
+                ))
 
-    if nodos:
-        lon, lat = zip(*nodos)
-        fig.add_trace(go.Scattermapbox(
-            lon=lon, lat=lat, mode="markers",
-            marker=dict(size=12, color="yellow", symbol="star"),
-            name="NODOS"
-        ))
+    # Puntos
+    for tipo in ["HUB", "NAP", "FOSC", "NODOS"]:
+        if capas[tipo]:
+            lon = [p[0][0] for p in capas[tipo]]
+            lat = [p[0][1] for p in capas[tipo]]
+            fig.add_trace(go.Scattermapbox(
+                lon=lon, lat=lat, mode="markers",
+                marker=dict(size=10, color=colores[tipo], symbol="circle"),
+                name=tipo
+            ))
 
-    if naps:
-        lon, lat = zip(*naps)
-        fig.add_trace(go.Scattermapbox(
-            lon=lon, lat=lat, mode="markers",
-            marker=dict(size=9, color="purple", symbol="triangle"),
-            name="NAPs"
-        ))
-
+    # Clientes simulados
     if clientes:
         lon, lat = zip(*clientes)
         fig.add_trace(go.Scattermapbox(
             lon=lon, lat=lat, mode="markers",
-            marker=dict(size=6, color="green"),
+            marker=dict(size=6, color="lime"),
             text=[f"{p} dBm" for p in potencias],
             name="Clientes"
         ))
 
     fig.update_layout(
         mapbox=dict(
-            style="open-street-map",
+            style="carto-darkmatter",
             center=dict(lat=lat_center, lon=lon_center),
             zoom=13
         ),
@@ -139,3 +174,4 @@ if uploaded_file is not None:
     )
 
     st.plotly_chart(fig, use_container_width=True)
+
