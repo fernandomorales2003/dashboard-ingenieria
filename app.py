@@ -141,7 +141,7 @@ if uploaded_file:
         "NODOS": "gray"
     }
 
-    # === AGRUPAMOS TODAS LAS LINEAS DE CADA TIPO ===
+    # === LINEAS ===
     for tipo in ["TRONCAL", "DERIVACION", "PRECON"]:
         all_lon, all_lat = [], []
         for seg in capas[tipo]:
@@ -158,7 +158,7 @@ if uploaded_file:
                 hoverinfo="none",
             ))
 
-    # === AGRUPAMOS PUNTOS (con símbolos y nombres) ===
+    # === PUNTOS ===
     for tipo in ["HUB", "NAP", "FOSC", "NODOS"]:
         if capas[tipo]:
             lon, lat, nombres = [], [], []
@@ -168,28 +168,36 @@ if uploaded_file:
                     lat.append(seg["coords"][0][1])
                     nombres.append(seg["name"] if seg["name"] else f"{tipo}_{len(nombres)+1}")
 
-            simbolo = "circle"
-            tamaño = 10
-            if tipo == "HUB":
-                simbolo = "diamond"
-                tamaño = 14
-            elif tipo == "NAP":
-                simbolo = "triangle-up"
-                tamaño = 12
-            elif tipo == "NODOS":
-                simbolo = "square"
-                tamaño = 10
+            # --- Estilo según tipo ---
+            simbolos = {
+                "HUB": "diamond",
+                "NAP": "triangle-up",
+                "FOSC": "circle",
+                "NODOS": "square"
+            }
+            tamaños = {
+                "HUB": 16,
+                "NAP": 13,
+                "FOSC": 11,
+                "NODOS": 10
+            }
 
             fig.add_trace(go.Scattermapbox(
-                lon=lon, lat=lat, mode="markers+text",
+                lon=lon, lat=lat,
+                mode="markers+text" if tipo == "HUB" else "markers",
                 text=nombres if tipo == "HUB" else None,
                 textposition="top right",
-                marker=dict(size=tamaño, color=colores[tipo], symbol=simbolo),
+                marker=dict(
+                    size=tamaños[tipo],
+                    color=colores[tipo],
+                    symbol=simbolos[tipo],
+                    line=dict(width=1, color="white")
+                ),
                 name=tipo,
                 hoverinfo="text",
             ))
 
-    # === CLIENTES SIMULADOS (INICIAN OCULTOS) ===
+    # === CLIENTES ===
     if clientes:
         lon, lat = zip(*clientes)
         fig.add_trace(go.Scattermapbox(
