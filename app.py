@@ -9,6 +9,7 @@ from zipfile import ZipFile
 import tempfile
 import os
 import datetime
+import fiona
 
 # -------------------------------
 # CONFIGURACIÓN INICIAL
@@ -18,7 +19,7 @@ st.title("📶 Dashboard de Ingeniería FTTH")
 st.markdown("**Visualización del proyecto, NAPs y clientes - Demo interactiva**")
 
 # -------------------------------
-# DATOS SIMULADOS - NAPs
+# DATOS SIMULADOS
 # -------------------------------
 np.random.seed(42)
 n_naps = 10
@@ -35,9 +36,7 @@ nap_data = pd.DataFrame({
     "Longitud": np.random.uniform(-58.45, -58.40, n_naps)
 })
 
-# -------------------------------
-# CLIENTES SIMULADOS (alrededor de cada NAP)
-# -------------------------------
+# CLIENTES alrededor de NAPs
 clientes = []
 for _, nap in nap_data.iterrows():
     for i in range(int(nap["Puertos ocupados"])):
@@ -74,7 +73,8 @@ st.subheader("🗺️ Mapa de tendido, NAPs y clientes")
 
 uploaded_file = st.file_uploader("📂 Subí el archivo del tendido (.KMZ o .KML)", type=["kmz", "kml"])
 
-def leer_kmz(uploaded_file):
+def leer_kmz_multi(uploaded_file):
+    """Lee todas las capas de un KMZ/KML y devuelve un GeoDataFrame combinado"""
     with tempfile.TemporaryDirectory() as tmpdir:
         kmz_path = os.path.join(tmpdir, "tendido.kmz")
         with open(kmz_path, "wb") as f:
@@ -87,8 +87,21 @@ def leer_kmz(uploaded_file):
         if not kml_files:
             st.error("No se encontró ningún archivo .kml dentro del KMZ.")
             return None
-        gdf = gpd.read_file(kml_files[0], driver="KML")
-        return gdf
+
+        all_layers = []
+        # leer todas las capas dentro del KML
+        for layer_name in fiona.listlayers(kml_files[0]):
+            try:
+                gdf_layer = gpd.read_file(kml_files[0], driver="KML", layer=layer_name)
+                if not gdf_layer.empty:
+                    all_layers.append(gdf_layer)
+            except Exception as e:
+                print(f"No se pudo leer la capa {layer_name}: {e}")
+
+        if all_layers:
+            return pd.concat(all_layers, ignore_index=True)
+        else:
+            return None
 
 # --- MAPA BASE ---
 map_fig = px.scatter_mapbox(
@@ -114,13 +127,9 @@ map_fig.add_trace(go.Scattermapbox(
     text=clientes_df["NAP asignada"]
 ))
 
-# --- TENDIDO DESDE KML/KMZ ---
+# --- TENDIDO ---
 if uploaded_file:
-    if uploaded_file.name.endswith(".kmz"):
-        gdf = leer_kmz(uploaded_file)
-    else:
-        gdf = gpd.read_file(uploaded_file, driver="KML")
-
+    gdf = leer_kmz_multi(uploaded_file)
     if gdf is not None and not gdf.empty:
         st.success(f"Archivo {uploaded_file.name} cargado correctamente ✅")
 
@@ -149,9 +158,9 @@ if uploaded_file:
                     name="Tendido FO"
                 ))
         else:
-            st.warning("No se detectaron líneas válidas en el archivo.")
+            st.warning("⚠️ No se detectaron líneas válidas en ninguna capa del archivo.")
     else:
-        st.warning("El archivo cargado no contiene geometrías válidas.")
+        st.warning("⚠️ No se encontraron geometrías en el archivo.")
 else:
     st.info("Subí un archivo KMZ o KML para ver el trazado real del tendido.")
 
