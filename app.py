@@ -2,252 +2,182 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
 import plotly.graph_objects as go
 import geopandas as gpd
 from zipfile import ZipFile
 import tempfile
 import os
-import datetime
 import fiona
 
 # -------------------------------
-# CONFIGURACIÓN INICIAL
+# CONFIGURACIÓN
 # -------------------------------
 st.set_page_config(page_title="Dashboard Ingeniería FTTH", layout="wide")
-st.title("📶 Dashboard de Ingeniería FTTH")
-st.markdown("**Visualización del proyecto, NAPs y clientes - Demo interactiva**")
+st.title("📶 Dashboard Ingeniería FTTH")
+st.markdown("**Visualización de red, NAPs, HUBs y clientes simulados**")
 
 # -------------------------------
-# DATOS SIMULADOS
+# CARGA DEL ARCHIVO KMZ/KML
 # -------------------------------
-np.random.seed(42)
-n_naps = 10
-naps = [f"NAP-{i:02d}" for i in range(1, n_naps + 1)]
-clientes_por_nap = np.random.randint(8, 14, n_naps)
-
-nap_data = pd.DataFrame({
-    "NAP": naps,
-    "Puertos totales": 16,
-    "Puertos ocupados": clientes_por_nap,
-    "Ocupación (%)": np.round((clientes_por_nap / 16) * 100, 1),
-    "Potencia promedio (dBm)": np.round(np.random.uniform(-24, -18, n_naps), 2),
-    "Latitud": np.random.uniform(-34.61, -34.56, n_naps),
-    "Longitud": np.random.uniform(-58.45, -58.40, n_naps)
-})
-
-# CLIENTES alrededor de NAPs
-clientes = []
-for _, nap in nap_data.iterrows():
-    for i in range(int(nap["Puertos ocupados"])):
-        clientes.append({
-            "ID Cliente": f"{nap['NAP']}-CL-{i+1:03d}",
-            "NAP asignada": nap["NAP"],
-            "Latitud": nap["Latitud"] + np.random.uniform(-0.0008, 0.0008),
-            "Longitud": nap["Longitud"] + np.random.uniform(-0.0008, 0.0008),
-            "Potencia (dBm)": np.round(np.random.uniform(-27, -15), 2),
-            "Estado": np.random.choice(["Activo", "Pendiente", "Baja"], p=[0.8, 0.15, 0.05]),
-            "Dirección": f"Calle {np.random.randint(1, 2000)}",
-            "Fecha de alta": datetime.date(2025, np.random.randint(1, 10), np.random.randint(1, 28))
-        })
-clientes_df = pd.DataFrame(clientes)
-
-# -------------------------------
-# SECCIÓN 1 - RESUMEN
-# -------------------------------
-st.header("📊 Resumen del Proyecto")
-
-col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("NAPs instaladas", len(naps))
-col2.metric("Clientes totales", len(clientes_df))
-col3.metric("Ocupación promedio", f"{nap_data['Ocupación (%)'].mean():.1f}%")
-col4.metric("Potencia promedio", f"{nap_data['Potencia promedio (dBm)'].mean():.1f} dBm")
-col5.metric("Red desplegada", f"{np.random.randint(12, 18)} km")
-
-st.divider()
-
-# -------------------------------
-# SECCIÓN 2 - MAPA INTERACTIVO
-# -------------------------------
-st.subheader("🗺️ Mapa de tendido, NAPs y clientes")
-
-uploaded_file = st.file_uploader("📂 Subí el archivo del tendido (.KMZ o .KML)", type=["kmz", "kml"])
+uploaded_file = st.file_uploader("📂 Subí el archivo del proyecto FTTH (.KMZ o .KML)", type=["kmz", "kml"])
 
 def leer_kmz_multi(uploaded_file):
-    """Lee todas las capas de un KMZ/KML y devuelve un GeoDataFrame combinado"""
+    """Lee todas las capas del KMZ/KML (estructura FTTH simplificada)."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        kmz_path = os.path.join(tmpdir, "tendido.kmz")
-        with open(kmz_path, "wb") as f:
+        path = os.path.join(tmpdir, uploaded_file.name)
+        with open(path, "wb") as f:
             f.write(uploaded_file.getvalue())
 
-        # Descomprimir KMZ
-        with ZipFile(kmz_path, "r") as zip_ref:
-            zip_ref.extractall(tmpdir)
-        kml_files = [os.path.join(tmpdir, f) for f in os.listdir(tmpdir) if f.endswith(".kml")]
-        if not kml_files:
-            st.error("No se encontró ningún archivo .kml dentro del KMZ.")
-            return None
+        # Si es KMZ, descomprimir
+        if uploaded_file.name.endswith(".kmz"):
+            with ZipFile(path, "r") as zip_ref:
+                zip_ref.extractall(tmpdir)
+            kml_files = [os.path.join(tmpdir, f) for f in os.listdir(tmpdir) if f.endswith(".kml")]
+            if not kml_files:
+                st.error("❌ No se encontró ningún archivo .kml dentro del KMZ.")
+                return None
+            path = kml_files[0]
 
         all_layers = []
-        for layer_name in fiona.listlayers(kml_files[0]):
+        for layer in fiona.listlayers(path):
             try:
-                gdf_layer = gpd.read_file(kml_files[0], driver="KML", layer=layer_name)
-                if not gdf_layer.empty:
-                    all_layers.append(gdf_layer)
+                gdf = gpd.read_file(path, driver="KML", layer=layer)
+                if not gdf.empty:
+                    gdf["layer"] = layer.upper()
+                    all_layers.append(gdf)
             except Exception:
                 continue
-
         if all_layers:
             return pd.concat(all_layers, ignore_index=True)
         else:
             return None
 
-# --- MAPA BASE ---
-map_fig = px.scatter_mapbox(
-    nap_data,
-    lat="Latitud",
-    lon="Longitud",
-    color="Ocupación (%)",
-    size="Puertos ocupados",
-    hover_name="NAP",
-    hover_data=["Puertos totales", "Puertos ocupados", "Potencia promedio (dBm)"],
-    color_continuous_scale=px.colors.sequential.Viridis,
-    zoom=13,
-    height=650
-)
+# -------------------------------
+# MAPA BASE
+# -------------------------------
+map_fig = go.Figure()
 
-# --- CLIENTES ---
-map_fig.add_trace(go.Scattermapbox(
-    lat=clientes_df["Latitud"],
-    lon=clientes_df["Longitud"],
-    mode="markers",
-    marker=go.scattermapbox.Marker(size=6, color="#2a8bf2", opacity=0.6),
-    name="Clientes",
-    text=clientes_df["NAP asignada"]
-))
-
-# --- TENDIDO ---
 if uploaded_file:
     gdf = leer_kmz_multi(uploaded_file)
     if gdf is not None and not gdf.empty:
-        st.success(f"Archivo {uploaded_file.name} cargado correctamente ✅")
+        st.success(f"✅ Archivo {uploaded_file.name} cargado correctamente")
 
-        all_lines = []
-        for _, row in gdf.iterrows():
-            geom = row.geometry
-            if geom is None:
-                continue
-            try:
-                if geom.geom_type == "LineString" and not geom.is_empty:
-                    all_lines.append(geom)
+        # Filtrar capas por nombre
+        capas = gdf["layer"].unique()
+        st.write("Capas detectadas:", list(capas))
+
+        # Definir colores
+        colores = {
+            "TRONCAL": "red",
+            "DERIV": "green",
+            "PRECO": "violet"
+        }
+
+        # Variables para centrar el mapa
+        all_lat, all_lon = [], []
+
+        # Dibujar líneas
+        for tipo in ["TRONCAL", "DERIV", "PRECO"]:
+            subset = gdf[gdf["layer"].str.contains(tipo)]
+            for _, row in subset.iterrows():
+                geom = row.geometry
+                if geom is None or geom.is_empty:
+                    continue
+                if geom.geom_type == "LineString":
+                    lon, lat = geom.xy
+                    all_lat.extend(lat)
+                    all_lon.extend(lon)
+                    map_fig.add_trace(go.Scattermapbox(
+                        lon=lon,
+                        lat=lat,
+                        mode="lines",
+                        line=dict(width=3, color=colores.get(tipo, "gray")),
+                        name=tipo
+                    ))
                 elif geom.geom_type == "MultiLineString":
                     for g in geom.geoms:
-                        if not g.is_empty:
-                            all_lines.append(g)
-                elif geom.geom_type == "GeometryCollection":
-                    for g in geom.geoms:
-                        if g.geom_type == "LineString" and not g.is_empty:
-                            all_lines.append(g)
-            except Exception:
-                continue
-
-        if all_lines:
-            lats, lons = [], []
-            for line in all_lines:
-                try:
-                    lon, lat = line.xy
-                    lats.extend(lat)
-                    lons.extend(lon)
-                    if len(lon) > 0 and len(lat) > 0:
+                        lon, lat = g.xy
+                        all_lat.extend(lat)
+                        all_lon.extend(lon)
                         map_fig.add_trace(go.Scattermapbox(
-                            lon=lon,
-                            lat=lat,
-                            mode="lines",
-                            line=dict(width=3, color="#00cc83"),
-                            name="Tendido FO"
+                            lon=lon, lat=lat, mode="lines",
+                            line=dict(width=3, color=colores.get(tipo, "gray")),
+                            name=tipo
                         ))
-                except Exception:
-                    continue
 
-            # 🔍 Centramos el mapa en el área del tendido
-            if lats and lons:
-                lat_center = np.mean(lats)
-                lon_center = np.mean(lons)
-                map_fig.update_layout(
-                    mapbox=dict(center=dict(lat=lat_center, lon=lon_center), zoom=14)
-                )
-        else:
-            st.warning("⚠️ No se detectaron líneas válidas en ninguna capa del archivo.")
+        # Dibujar puntos HUB, NAP, FOSC, NODOS
+        puntos = []
+        for tipo in ["HUB", "NAP", "FOSC", "NODOS"]:
+            subset = gdf[gdf["layer"].str.contains(tipo)]
+            if subset.empty:
+                continue
+            subset["lon"] = subset.geometry.x
+            subset["lat"] = subset.geometry.y
+            all_lat.extend(subset["lat"])
+            all_lon.extend(subset["lon"])
+
+            icon_url = None
+            size = 12
+            color = "gray"
+
+            if tipo == "HUB":
+                icon_url = "http://maps.google.com/mapfiles/kml/shapes/polygon.png"
+                color = "blue"
+            elif tipo == "NAP":
+                icon_url = "http://maps.google.com/mapfiles/kml/shapes/triangle.png"
+                color = "red"
+            elif tipo == "FOSC":
+                color = "black"
+                size = 10
+            elif tipo == "NODOS":
+                color = "yellow"
+                size = 14
+
+            map_fig.add_trace(go.Scattermapbox(
+                lat=subset["lat"],
+                lon=subset["lon"],
+                mode="markers",
+                marker=dict(size=size, color=color),
+                name=tipo,
+                text=subset["Name"] if "Name" in subset.columns else tipo
+            ))
+
+            if tipo == "NAP":
+                puntos = subset[["lat", "lon"]].to_numpy()
+
+        # Simular clientes alrededor de NAPs
+        clientes = []
+        for lat, lon in puntos:
+            for _ in range(np.random.randint(3, 8)):
+                clientes.append({
+                    "lat": lat + np.random.uniform(-0.0005, 0.0005),
+                    "lon": lon + np.random.uniform(-0.0005, 0.0005),
+                    "potencia": np.round(np.random.uniform(-25, -17), 2)
+                })
+        if clientes:
+            df_clientes = pd.DataFrame(clientes)
+            map_fig.add_trace(go.Scattermapbox(
+                lat=df_clientes["lat"],
+                lon=df_clientes["lon"],
+                mode="markers",
+                marker=dict(size=5, color="lightgray", opacity=0.6),
+                name="Clientes simulados",
+                text=df_clientes["potencia"].astype(str) + " dBm"
+            ))
+
+        # Centrar mapa
+        if all_lat and all_lon:
+            map_fig.update_layout(
+                mapbox=dict(
+                    center=dict(lat=np.mean(all_lat), lon=np.mean(all_lon)),
+                    zoom=14,
+                    style="carto-positron"
+                ),
+                margin={"r":0,"t":0,"l":0,"b":0}
+            )
+
+        st.plotly_chart(map_fig, use_container_width=True)
     else:
-        st.warning("⚠️ No se encontraron geometrías en el archivo.")
+        st.warning("⚠️ No se encontraron geometrías válidas en el archivo.")
 else:
-    st.info("Subí un archivo KMZ o KML para ver el trazado real del tendido.")
-
-map_fig.update_layout(mapbox_style="carto-positron", margin={"r":0,"t":0,"l":0,"b":0})
-st.plotly_chart(map_fig, use_container_width=True)
-
-st.divider()
-
-# -------------------------------
-# SECCIÓN 3 - CLIENTES
-# -------------------------------
-st.subheader("👥 Clientes conectados")
-
-with st.expander("Ver / cargar clientes"):
-    st.dataframe(clientes_df, use_container_width=True)
-    st.markdown("### ➕ Agregar nuevo cliente")
-    with st.form("nuevo_cliente_form"):
-        id_cliente = st.text_input("ID Cliente")
-        nap_select = st.selectbox("NAP asignada", naps)
-        direccion = st.text_input("Dirección")
-        potencia = st.number_input("Potencia medida (dBm)", -35.0, -10.0, -22.0)
-        estado = st.selectbox("Estado", ["Activo", "Pendiente", "Baja"])
-        submitted = st.form_submit_button("Agregar")
-        if submitted:
-            st.success(f"Cliente {id_cliente or '(sin ID)'} agregado correctamente a {nap_select} ✅")
-
-st.divider()
-
-# -------------------------------
-# SECCIÓN 4 - MÉTRICAS
-# -------------------------------
-st.subheader("📈 Métricas de rendimiento")
-
-colA, colB = st.columns(2)
-with colA:
-    fig_ocupacion = px.bar(
-        nap_data, x="NAP", y="Ocupación (%)", color="Ocupación (%)",
-        text="Ocupación (%)", color_continuous_scale="Blues"
-    )
-    fig_ocupacion.update_layout(title="Ocupación por NAP", yaxis_title="%", xaxis_title=None)
-    st.plotly_chart(fig_ocupacion, use_container_width=True)
-
-with colB:
-    fig_potencia = px.box(
-        clientes_df, x="NAP asignada", y="Potencia (dBm)", color="NAP asignada",
-        points="all", title="Distribución de potencia óptica por NAP"
-    )
-    st.plotly_chart(fig_potencia, use_container_width=True)
-
-# -------------------------------
-# EXPORTACIÓN
-# -------------------------------
-st.divider()
-st.subheader("📤 Exportar datos")
-colx, coly = st.columns(2)
-with colx:
-    st.download_button(
-        "Descargar clientes (CSV)",
-        clientes_df.to_csv(index=False).encode("utf-8"),
-        "clientes_ftth.csv",
-        "text/csv"
-    )
-with coly:
-    st.download_button(
-        "Descargar NAPs (CSV)",
-        nap_data.to_csv(index=False).encode("utf-8"),
-        "naps_ftth.csv",
-        "text/csv"
-    )
-
-st.success("✅ Dashboard FTTH listo para presentación del workshop.")
+    st.info("Subí un archivo KMZ o KML para ver el tendido FTTH.")
