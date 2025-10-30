@@ -3,6 +3,12 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
+import geopandas as gpd
+from zipfile import ZipFile
+from io import BytesIO
+import tempfile
+import os
 import datetime
 
 # -------------------------------
@@ -10,18 +16,15 @@ import datetime
 # -------------------------------
 st.set_page_config(page_title="Dashboard Ingeniería FTTH", layout="wide")
 st.title("📶 Dashboard de Ingeniería FTTH")
-st.markdown("**Panel de control del proyecto de red óptica FTTH - Datos simulados**")
+st.markdown("**Visualización de red, NAPs y clientes - Proyecto FTTH (Demo)**")
 
 # -------------------------------
-# GENERACIÓN DE DATOS FICTICIOS
+# DATOS SIMULADOS
 # -------------------------------
 np.random.seed(42)
-
-# Simulación de NAPs
 n_naps = 10
 naps = [f"NAP-{i:02d}" for i in range(1, n_naps+1)]
-ocupacion = np.random.randint(40, 100, n_naps)
-clientes_por_nap = ocupacion // 4
+clientes_por_nap = np.random.randint(6, 16, n_naps)
 
 nap_data = pd.DataFrame({
     "NAP": naps,
@@ -29,11 +32,10 @@ nap_data = pd.DataFrame({
     "Puertos ocupados": clientes_por_nap,
     "Ocupación (%)": np.round((clientes_por_nap / 16) * 100, 1),
     "Potencia promedio (dBm)": np.round(np.random.uniform(-24, -18, n_naps), 2),
-    "Latitud": np.random.uniform(-34.6, -34.55, n_naps),
+    "Latitud": np.random.uniform(-34.61, -34.56, n_naps),
     "Longitud": np.random.uniform(-58.45, -58.40, n_naps)
 })
 
-# Simulación de clientes
 n_clientes = int(sum(clientes_por_nap))
 clientes = []
 for i in range(n_clientes):
@@ -63,23 +65,71 @@ col5.metric("Red desplegada", f"{np.random.randint(12, 18)} km")
 st.divider()
 
 # -------------------------------
-# SECCIÓN 2 - MAPA DE LA RED
+# SECCIÓN 2 - MAPA INTERACTIVO
 # -------------------------------
-st.subheader("🗺️ Mapa de NAPs y cobertura")
-map_fig = px.scatter_mapbox(
-    nap_data,
-    lat="Latitud",
-    lon="Longitud",
-    color="Ocupación (%)",
-    size="Puertos ocupados",
-    hover_name="NAP",
-    hover_data=["Puertos totales", "Puertos ocupados", "Potencia promedio (dBm)"],
-    color_continuous_scale=px.colors.sequential.Viridis,
-    zoom=13,
-    height=500
-)
-map_fig.update_layout(mapbox_style="carto-positron", margin={"r":0,"t":0,"l":0,"b":0})
-st.plotly_chart(map_fig, use_container_width=True)
+st.subheader("🗺️ Mapa de tendido y NAPs")
+
+uploaded_file = st.file_uploader("📂 Subí el archivo del tendido (.KMZ o .KML)", type=["kmz", "kml"])
+
+# Función auxiliar para leer KMZ o KML
+def leer_kmz(uploaded_file):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        kmz_path = os.path.join(tmpdir, "tendido.kmz")
+        with open(kmz_path, "wb") as f:
+            f.write(uploaded_file.getvalue())
+
+        # Descomprimir si es KMZ
+        with ZipFile(kmz_path, "r") as zip_ref:
+            zip_ref.extractall(tmpdir)
+        kml_files = [os.path.join(tmpdir, f) for f in os.listdir(tmpdir) if f.endswith(".kml")]
+        if not kml_files:
+            st.error("No se encontró ningún archivo .kml dentro del KMZ.")
+            return None
+        gdf = gpd.read_file(kml_files[0], driver="KML")
+        return gdf
+
+# Renderización del mapa
+if uploaded_file:
+    if uploaded_file.name.endswith(".kmz"):
+        gdf = leer_kmz(uploaded_file)
+    else:
+        gdf = gpd.read_file(uploaded_file, driver="KML")
+
+    if gdf is not None and not gdf.empty:
+        st.success(f"Archivo {uploaded_file.name} cargado correctamente ✅")
+        # Crear figura base
+        map_fig = px.scatter_mapbox(
+            nap_data,
+            lat="Latitud",
+            lon="Longitud",
+            color="Ocupación (%)",
+            size="Puertos ocupados",
+            hover_name="NAP",
+            hover_data=["Puertos totales", "Puertos ocupados", "Potencia promedio (dBm)"],
+            color_continuous_scale=px.colors.sequential.Viridis,
+            zoom=13,
+            height=600
+        )
+
+        # Agregar líneas del KML
+        for _, row in gdf.iterrows():
+            if row.geometry.geom_type == "LineString":
+                lon, lat = row.geometry.xy
+                map_fig.add_trace(go.Scattermapbox(
+                    lon=lon, lat=lat,
+                    mode="lines",
+                    line=dict(width=3, color="#00cc83"),
+                    name="Tendido FO"
+                ))
+
+        map_fig.update_layout(mapbox_style="carto-positron", margin={"r":0,"t":0,"l":0,"b":0})
+        st.plotly_chart(map_fig, use_container_width=True)
+    else:
+        st.warning("El archivo cargado no contiene geometrías válidas.")
+else:
+    st.info("Subí un archivo KMZ o KML para ver el trazado del tendido.")
+
+st.divider()
 
 # -------------------------------
 # SECCIÓN 3 - CLIENTES
@@ -88,7 +138,6 @@ st.subheader("👥 Clientes conectados")
 
 with st.expander("Ver / cargar clientes"):
     st.dataframe(clientes_df, use_container_width=True)
-
     st.markdown("### ➕ Agregar nuevo cliente")
     with st.form("nuevo_cliente_form"):
         id_cliente = st.text_input("ID Cliente")
@@ -108,7 +157,6 @@ st.divider()
 st.subheader("📈 Métricas de rendimiento")
 
 colA, colB = st.columns(2)
-
 with colA:
     fig_ocupacion = px.bar(
         nap_data, x="NAP", y="Ocupación (%)", color="Ocupación (%)",
@@ -125,12 +173,11 @@ with colB:
     st.plotly_chart(fig_potencia, use_container_width=True)
 
 # -------------------------------
-# SECCIÓN 5 - EXPORTACIÓN
+# EXPORTACIÓN
 # -------------------------------
 st.divider()
 st.subheader("📤 Exportar datos")
 colx, coly = st.columns(2)
-
 with colx:
     st.download_button(
         "Descargar clientes (CSV)",
@@ -146,4 +193,4 @@ with coly:
         "text/csv"
     )
 
-st.success("✅ Dashboard generado con datos ficticios para presentación del workshop.")
+st.success("✅ Dashboard interactivo listo para workshop FTTH.")
