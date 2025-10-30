@@ -7,8 +7,7 @@ st.title("📡 Dashboard Ingeniería FTTH")
 
 uploaded_file = st.file_uploader("📁 Subir archivo KMZ/KML/RTF", type=["kmz", "kml", "rtf"])
 
-# ----------- FUNCIONES -----------
-
+# ----------- EXTRACCIÓN ----------
 def extract_kml(uploaded_file):
     temp = tempfile.NamedTemporaryFile(delete=False)
     temp.write(uploaded_file.read())
@@ -36,6 +35,7 @@ def extract_kml(uploaded_file):
     return None
 
 
+# ----------- PARSEO ----------
 def parse_kml(kml_path):
     with open(kml_path, "r", encoding="utf-8") as f:
         xml = f.read()
@@ -85,8 +85,7 @@ def parse_kml(kml_path):
     return capas
 
 
-# ----------- MAIN -----------
-
+# ----------- APP PRINCIPAL ----------
 if uploaded_file:
     kml = extract_kml(uploaded_file)
     if not kml:
@@ -117,11 +116,6 @@ if uploaded_file:
         "TRONCAL": "red", "DERIVACION": "green", "PRECON": "violet",
         "HUB": "blue", "NAP": "magenta", "FOSC": "yellow", "NODOS": "gray"
     }
-    simbolos = {
-        "HUB": "diamond", "NAP": "triangle-up",
-        "FOSC": "circle", "NODOS": "square"
-    }
-    tamaños = {"HUB": 16, "NAP": 13, "FOSC": 11, "NODOS": 10}
 
     # ---- LÍNEAS ----
     for tipo in ["TRONCAL", "DERIVACION", "PRECON"]:
@@ -138,7 +132,7 @@ if uploaded_file:
         if lon and lat:
             fig.add_trace(go.Scattermapbox(
                 lon=lon, lat=lat, mode="lines",
-                line=dict(width=3, color=str(colores.get(tipo, "white"))),
+                line=dict(width=3, color=colores.get(tipo, "white")),
                 name=tipo
             ))
 
@@ -147,25 +141,17 @@ if uploaded_file:
         puntos = capas.get(tipo, [])
         if not puntos:
             continue
-        lon, lat, nombres = [], [], []
+        lon, lat = [], []
         for p in puntos:
             c = p.get("coords", [])
             if c:
                 lon.append(c[0][0])
                 lat.append(c[0][1])
-                nombres.append(p.get("name", tipo))
         if lon and lat:
             fig.add_trace(go.Scattermapbox(
                 lon=lon, lat=lat,
-                mode="markers+text" if tipo == "HUB" else "markers",
-                text=nombres if tipo == "HUB" else None,
-                textposition="top right",
-                marker=dict(
-                    size=int(tamaños.get(tipo, 10)),
-                    color=str(colores.get(tipo, "white")),
-                    symbol=str(simbolos.get(tipo, "circle")),
-                    line=dict(width=1, color="white")
-                ),
+                mode="markers",
+                marker=dict(size=8, color=colores.get(tipo, "white")),
                 name=tipo
             ))
 
@@ -174,7 +160,7 @@ if uploaded_file:
         lon, lat = zip(*clientes)
         fig.add_trace(go.Scattermapbox(
             lon=lon, lat=lat, mode="markers",
-            marker=dict(size=5, color="lime"),
+            marker=dict(size=4, color="lime"),
             name="Clientes Simulados", visible="legendonly"
         ))
 
@@ -185,4 +171,5 @@ if uploaded_file:
     )
 
     st.plotly_chart(fig, use_container_width=True)
+
 
