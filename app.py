@@ -110,7 +110,7 @@ if uploaded_file:
     lon_center = sum(p[0] for p in all_coords) / len(all_coords)
     lat_center = sum(p[1] for p in all_coords) / len(all_coords)
 
-    # Simular clientes cerca de NAPs
+    # ---------- SIMULACIÓN DE CLIENTES ----------
     clientes, potencias = [], []
     for nap in capas["NAP"]:
         for (x, y) in nap["coords"]:
@@ -159,28 +159,27 @@ if uploaded_file:
             ))
 
     # === PUNTOS ===
+    simbolos = {
+        "HUB": "diamond",
+        "NAP": "triangle-up",
+        "FOSC": "circle",
+        "NODOS": "square"
+    }
+    tamaños = {
+        "HUB": 16,
+        "NAP": 13,
+        "FOSC": 11,
+        "NODOS": 10
+    }
+
     for tipo in ["HUB", "NAP", "FOSC", "NODOS"]:
-        if capas[tipo]:
+        if capas[tipo] and tipo in simbolos:
             lon, lat, nombres = [], [], []
             for seg in capas[tipo]:
-                if len(seg["coords"]) >= 1:
+                if seg and "coords" in seg and len(seg["coords"]) >= 1:
                     lon.append(seg["coords"][0][0])
                     lat.append(seg["coords"][0][1])
-                    nombres.append(seg["name"] if seg["name"] else f"{tipo}_{len(nombres)+1}")
-
-            # --- Estilo según tipo ---
-            simbolos = {
-                "HUB": "diamond",
-                "NAP": "triangle-up",
-                "FOSC": "circle",
-                "NODOS": "square"
-            }
-            tamaños = {
-                "HUB": 16,
-                "NAP": 13,
-                "FOSC": 11,
-                "NODOS": 10
-            }
+                    nombres.append(seg.get("name", f"{tipo}_{len(nombres)+1}"))
 
             fig.add_trace(go.Scattermapbox(
                 lon=lon, lat=lat,
@@ -188,9 +187,9 @@ if uploaded_file:
                 text=nombres if tipo == "HUB" else None,
                 textposition="top right",
                 marker=dict(
-                    size=tamaños[tipo],
-                    color=colores[tipo],
-                    symbol=simbolos[tipo],
+                    size=tamaños.get(tipo, 10),
+                    color=colores.get(tipo, "white"),
+                    symbol=simbolos.get(tipo, "circle"),
                     line=dict(width=1, color="white")
                 ),
                 name=tipo,
