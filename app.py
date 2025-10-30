@@ -37,11 +37,10 @@ def extract_kml(uploaded_file):
     return None
 
 
-# ----------- PARSEO ROBUSTO ----------
+# ----------- PARSEO ----------
 def parse_kml(kml_path):
     with open(kml_path, "r", encoding="utf-8") as f:
         content = f.read()
-
     try:
         kml_dict = xmltodict.parse(content)
     except Exception:
@@ -72,19 +71,15 @@ def parse_kml(kml_path):
                                 coords = [list(map(float, c.split(",")[:2])) for c in coords_text.strip().split()]
                             except Exception:
                                 continue
-
                             nombre_punto = str(p.get("name", "")).strip()
-                            nombre_carpeta = carpeta.upper()
                             tipo = "NODOS"
-                            if "TRONCAL" in nombre_carpeta: tipo = "TRONCAL"
-                            elif "DERIV" in nombre_carpeta: tipo = "DERIVACION"
-                            elif "PRE" in nombre_carpeta: tipo = "PRECON"
-                            elif "HUB" in nombre_carpeta: tipo = "HUB"
-                            elif "NAP" in nombre_carpeta: tipo = "NAP"
-                            elif "FOSC" in nombre_carpeta: tipo = "FOSC"
-
+                            if "TRONCAL" in carpeta: tipo = "TRONCAL"
+                            elif "DERIV" in carpeta: tipo = "DERIVACION"
+                            elif "PRE" in carpeta: tipo = "PRECON"
+                            elif "HUB" in carpeta: tipo = "HUB"
+                            elif "NAP" in carpeta: tipo = "NAP"
+                            elif "FOSC" in carpeta: tipo = "FOSC"
                             capas[tipo].append({"coords": coords, "name": nombre_punto})
-
                 elif isinstance(value, (dict, list)):
                     buscar(value, carpeta)
 
@@ -100,17 +95,16 @@ if uploaded_file:
         st.stop()
 
     capas = parse_kml(kml_path)
-    all_coords = [pt for lista in capas.values() for seg in lista for pt in seg["coords"]]
+    all_coords = [pt for lista in capas.values() for seg in lista for pt in seg["coords"] if seg["coords"]]
 
     if not all_coords:
         st.warning("⚠️ No se encontraron coordenadas válidas.")
-        st.json({k: len(v) for k, v in capas.items()})
         st.stop()
 
     lon_center = sum(p[0] for p in all_coords) / len(all_coords)
     lat_center = sum(p[1] for p in all_coords) / len(all_coords)
 
-    # ---------- SIMULACIÓN DE CLIENTES ----------
+    # --- Simular clientes ---
     clientes, potencias = [], []
     for nap in capas["NAP"]:
         for (x, y) in nap["coords"]:
@@ -119,17 +113,13 @@ if uploaded_file:
                 clientes.append([cx, cy])
                 potencias.append(round(random.uniform(-25, -17), 2))
 
-    # ---------- MÉTRICAS ----------
-    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
-    c1.metric("Troncales", len(capas["TRONCAL"]))
-    c2.metric("Derivaciones", len(capas["DERIVACION"]))
-    c3.metric("Preconectorizado", len(capas["PRECON"]))
-    c4.metric("HUB", len(capas["HUB"]))
-    c5.metric("NAP", len(capas["NAP"]))
-    c6.metric("FOSC", len(capas["FOSC"]))
-    c7.metric("Clientes", len(clientes))
+    # --- Métricas ---
+    col = st.columns(7)
+    keys = ["TRONCAL", "DERIVACION", "PRECON", "HUB", "NAP", "FOSC", "NODOS"]
+    for i, k in enumerate(keys[:7]):
+        col[i].metric(k.capitalize(), len(capas[k]))
 
-    # ---------- MAPA ----------
+    # --- MAPA ---
     fig = go.Figure()
     colores = {
         "TRONCAL": "red",
@@ -141,7 +131,7 @@ if uploaded_file:
         "NODOS": "gray"
     }
 
-    # === LINEAS ===
+    # LINEAS
     for tipo in ["TRONCAL", "DERIVACION", "PRECON"]:
         all_lon, all_lat = [], []
         for seg in capas[tipo]:
@@ -150,37 +140,25 @@ if uploaded_file:
                 lon, lat = zip(*coords)
                 all_lon += [None] + list(lon)
                 all_lat += [None] + list(lat)
-        if all_lon:
+        if all_lon and all_lat:
             fig.add_trace(go.Scattermapbox(
-                lon=all_lon, lat=all_lat, mode="lines",
-                line=dict(width=3, color=colores[tipo]),
-                name=tipo,
-                hoverinfo="none",
+                lon=all_lon, lat=all_lat,
+                mode="lines", line=dict(width=3, color=colores[tipo]),
+                name=tipo
             ))
 
-    # === PUNTOS ===
-    simbolos = {
-        "HUB": "diamond",
-        "NAP": "triangle-up",
-        "FOSC": "circle",
-        "NODOS": "square"
-    }
-    tamaños = {
-        "HUB": 16,
-        "NAP": 13,
-        "FOSC": 11,
-        "NODOS": 10
-    }
+    # PUNTOS
+    simbolos = {"HUB": "diamond", "NAP": "triangle-up", "FOSC": "circle", "NODOS": "square"}
+    tamaños = {"HUB": 16, "NAP": 13, "FOSC": 11, "NODOS": 10}
 
     for tipo in ["HUB", "NAP", "FOSC", "NODOS"]:
-        if capas.get(tipo):
+        if tipo in capas and capas[tipo]:
             lon, lat, nombres = [], [], []
             for seg in capas[tipo]:
-                if seg and seg.get("coords"):
+                if seg.get("coords"):
                     lon.append(seg["coords"][0][0])
                     lat.append(seg["coords"][0][1])
                     nombres.append(seg.get("name", f"{tipo}_{len(nombres)+1}"))
-
             if lon and lat:
                 fig.add_trace(go.Scattermapbox(
                     lon=lon, lat=lat,
@@ -190,35 +168,29 @@ if uploaded_file:
                     marker=dict(
                         size=tamaños.get(tipo, 10),
                         color=colores.get(tipo, "white"),
-                        symbol=simbolos.get(tipo, "circle"),
+                        symbol=str(simbolos.get(tipo, "circle")),
                         line=dict(width=1, color="white")
                     ),
-                    name=tipo,
-                    hoverinfo="text",
+                    name=tipo
                 ))
 
-    # === CLIENTES ===
+    # CLIENTES
     if clientes:
         lon, lat = zip(*clientes)
         fig.add_trace(go.Scattermapbox(
-            lon=lon, lat=lat, mode="markers",
+            lon=lon, lat=lat,
+            mode="markers",
             marker=dict(size=5, color="lime"),
             text=[f"{p} dBm" for p in potencias],
             name="Clientes (Simulados)",
-            hoverinfo="text",
-            visible="legendonly",
+            visible="legendonly"
         ))
 
-    # === CONFIG MAPA ===
     fig.update_layout(
-        mapbox=dict(
-            style="carto-darkmatter",
-            center=dict(lat=lat_center, lon=lon_center),
-            zoom=12.8
-        ),
+        mapbox=dict(style="carto-darkmatter", center=dict(lat=lat_center, lon=lon_center), zoom=12.8),
         margin=dict(l=0, r=0, t=0, b=0),
         height=720,
-        legend=dict(x=0, y=1),
+        legend=dict(x=0, y=1)
     )
 
     st.plotly_chart(fig, use_container_width=True)
