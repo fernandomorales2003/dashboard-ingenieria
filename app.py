@@ -150,7 +150,8 @@ if uploaded_file:
             fig.add_trace(go.Scattermapbox(
                 lon=lon, lat=lat, mode="lines",
                 line=dict(width=3, color=colores.get(tipo, "white")),
-                name=tipo
+                name=tipo,
+                hoverinfo="skip"  # 🟢 No muestra tooltip
             ))
 
     # Puntos
@@ -169,7 +170,8 @@ if uploaded_file:
                 lon=lon, lat=lat,
                 mode="markers",
                 marker=dict(size=8, color=colores.get(tipo, "white")),
-                name=tipo
+                name=tipo,
+                hoverinfo="skip"  # 🟢 sin coordenadas
             ))
 
     # Clientes
@@ -179,7 +181,8 @@ if uploaded_file:
             mode="markers",
             marker=dict(size=4, color="lime"),
             name="Clientes Simulados",
-            visible="legendonly"
+            visible="legendonly",
+            hoverinfo="skip"
         ))
 
     fig.update_layout(
@@ -190,28 +193,56 @@ if uploaded_file:
 
     st.plotly_chart(fig, use_container_width=True)
 
-    # ---- ANÁLISIS INFERIOR ----
-    st.subheader("📊 Indicadores de Clientes por HUB y NAP")
-
+    # ---- INDICADORES INFERIORES ----
     if not df_clientes.empty:
-        resumen = df_clientes.groupby(["HUB", "NAP"]).size().reset_index(name="Clientes")
-        st.dataframe(resumen, use_container_width=True)
+        st.subheader("📊 Indicadores de Clientes por HUB y NAP")
 
-        # Cantidad de clientes por HUB
-        resumen_hub = df_clientes.groupby("HUB").size().reset_index(name="Total Clientes")
-        fig_bar = go.Figure(go.Bar(
-            x=resumen_hub["HUB"], y=resumen_hub["Total Clientes"], marker_color="#00cc83"
-        ))
-        fig_bar.update_layout(title="Cantidad de Clientes por HUB", yaxis_title="Clientes", height=300)
-        st.plotly_chart(fig_bar, use_container_width=True)
+        col1, col2, col3 = st.columns(3)
 
-        # Potencias
-        fig_pot = go.Figure()
-        for hub in df_clientes["HUB"].unique():
-            df_h = df_clientes[df_clientes["HUB"] == hub]
-            fig_pot.add_trace(go.Box(
-                y=df_h["Potencia (dBm)"], name=hub,
-                boxpoints="all", jitter=0.3, whiskerwidth=0.2, marker_size=4
+        # 📍 Columna 1 - Mapa tipo constelación (HUB vs NAP)
+        with col1:
+            fig_scatter = go.Figure()
+            for hub in df_clientes["HUB"].unique():
+                df_hub = df_clientes[df_clientes["HUB"] == hub]
+                fig_scatter.add_trace(go.Scatter(
+                    x=df_hub["NAP"], y=df_hub["Potencia (dBm)"],
+                    mode="markers", name=hub,
+                    marker=dict(size=8, opacity=0.7)
+                ))
+            fig_scatter.update_layout(
+                title="Constelación de Clientes (NAP vs Potencia)",
+                xaxis_title="NAP",
+                yaxis_title="Potencia (dBm)",
+                height=300
+            )
+            st.plotly_chart(fig_scatter, use_container_width=True)
+
+        # 📊 Columna 2 - Clientes por HUB
+        with col2:
+            resumen_hub = df_clientes.groupby("HUB").size().reset_index(name="Total Clientes")
+            fig_bar = go.Figure(go.Bar(
+                x=resumen_hub["HUB"], y=resumen_hub["Total Clientes"],
+                marker_color="#00cc83"
             ))
-        fig_pot.update_layout(title="Distribución de Potencias por HUB", yaxis_title="Potencia (dBm)", height=300)
-        st.plotly_chart(fig_pot, use_container_width=True)
+            fig_bar.update_layout(
+                title="Cantidad de Clientes por HUB",
+                yaxis_title="Clientes",
+                height=300
+            )
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+        # 📈 Columna 3 - Distribución de Potencias
+        with col3:
+            fig_pot = go.Figure()
+            for hub in df_clientes["HUB"].unique():
+                df_h = df_clientes[df_clientes["HUB"] == hub]
+                fig_pot.add_trace(go.Box(
+                    y=df_h["Potencia (dBm)"], name=hub,
+                    boxpoints="all", jitter=0.3, whiskerwidth=0.2, marker_size=4
+                ))
+            fig_pot.update_layout(
+                title="Distribución de Potencias por HUB",
+                yaxis_title="Potencia (dBm)",
+                height=300
+            )
+            st.plotly_chart(fig_pot, use_container_width=True)
