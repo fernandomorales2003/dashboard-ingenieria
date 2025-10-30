@@ -3,5 +3,6 @@ pandas>=2.2.2
 numpy>=1.26.4
 plotly>=5.22.0
 geopandas>=1.0.1
-shapely>=2.0.4
 fiona>=1.9.6
+shapely>=2.0.4
+
