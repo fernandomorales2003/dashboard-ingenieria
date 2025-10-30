@@ -151,7 +151,7 @@ if uploaded_file:
                 lon=lon, lat=lat, mode="lines",
                 line=dict(width=3, color=colores.get(tipo, "white")),
                 name=tipo,
-                hoverinfo="skip"  # 🟢 No muestra tooltip
+                hoverinfo="skip"
             ))
 
     # Puntos
@@ -171,7 +171,7 @@ if uploaded_file:
                 mode="markers",
                 marker=dict(size=8, color=colores.get(tipo, "white")),
                 name=tipo,
-                hoverinfo="skip"  # 🟢 sin coordenadas
+                hoverinfo="skip"
             ))
 
     # Clientes
@@ -195,27 +195,9 @@ if uploaded_file:
 
     # ---- INDICADORES INFERIORES ----
     if not df_clientes.empty:
-        st.subheader("📊 Indicadores de Clientes por HUB y NAP")
+        st.subheader("📊 Indicadores de Clientes por HUB")
 
-        col1, col2, col3 = st.columns(3)
-
-        # 📍 Columna 1 - Mapa tipo constelación (HUB vs NAP)
-        with col1:
-            fig_scatter = go.Figure()
-            for hub in df_clientes["HUB"].unique():
-                df_hub = df_clientes[df_clientes["HUB"] == hub]
-                fig_scatter.add_trace(go.Scatter(
-                    x=df_hub["NAP"], y=df_hub["Potencia (dBm)"],
-                    mode="markers", name=hub,
-                    marker=dict(size=8, opacity=0.7)
-                ))
-            fig_scatter.update_layout(
-                title="Constelación de Clientes (NAP vs Potencia)",
-                xaxis_title="NAP",
-                yaxis_title="Potencia (dBm)",
-                height=300
-            )
-            st.plotly_chart(fig_scatter, use_container_width=True)
+        col2, col3 = st.columns(2)
 
         # 📊 Columna 2 - Clientes por HUB
         with col2:
