@@ -1,21 +1,19 @@
 # app.py
 import streamlit as st
-import pandas as pd
 import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
 from zipfile import ZipFile
 from io import BytesIO
-import plotly.graph_objects as go
-from fastkml import kml
-from shapely.geometry import LineString, MultiLineString, Point, GeometryCollection, Polygon, MultiPolygon
 import xml.etree.ElementTree as ET
 
-st.set_page_config(page_title="Dashboard Ingeniería FTTH", layout="wide")
-st.title("📶 Dashboard Ingeniería FTTH (fastkml)")
-st.caption("TRONCAL/DERIV/PRECO + HUB/NAP/FOSC/NODOS + clientes simulados")
+st.set_page_config(page_title="Dashboard Ingeniería FTTH (XML parser)", layout="wide")
+st.title("📶 Dashboard Ingeniería FTTH")
+st.caption("Parser XML directo: TRONCAL/DERIV/PRECO + HUB/NAP/FOSC/NODOS + clientes simulados")
 
-uploaded = st.file_uploader("📂 Subí tu archivo FTTH (.KMZ o .KML)", type=["kmz", "kml"])
-
-# --- utilidades ---
+# ----------------------------
+# Config
+# ----------------------------
 LINE_LAYERS = ["TRONCAL", "DERIV", "PRECO"]
 POINT_LAYERS = ["HUB", "NAP", "FOSC", "NODOS"]
 
@@ -27,13 +25,23 @@ POINT_STYLE = {
     "NODOS": {"color": "yellow", "size": 14, "symbol": "star"}
 }
 
-def read_kml_text(file):
-    """Devuelve el texto KML desde un archivo .kml o dentro de un .kmz."""
-    data = file.read()
-    file.seek(0)
-    if file.name.lower().endswith(".kmz"):
-        with ZipFile(BytesIO(data)) as z:
-            # Prioriza doc.kml; si no, el primer .kml
+NS = {
+    "kml": "http://www.opengis.net/kml/2.2",
+    "gx":  "http://www.google.com/kml/ext/2.2"
+}
+
+# ----------------------------
+# Utilidades
+# ----------------------------
+def get_kml_bytes(uploaded_file):
+    """Devuelve bytes del .kml desde un .kml o dentro de un .kmz (prioriza doc.kml)."""
+    raw = uploaded_file.read()
+    uploaded_file.seek(0)
+    name = uploaded_file.name.lower()
+    if name.endswith(".kml"):
+        return raw
+    if name.endswith(".kmz"):
+        with ZipFile(BytesIO(raw)) as z:
             names = z.namelist()
             kml_name = next((n for n in names if n.endswith("doc.kml")), None)
             if not kml_name:
@@ -41,175 +49,185 @@ def read_kml_text(file):
             if not kml_name:
                 return None
             return z.read(kml_name)
-    else:
-        return data
+    return None
 
-def walk_features(feat, parents, out):
-    """Recorre recursivamente Document/Folder/Placemark y acumula geometrías."""
-    try:
-        # Si es contenedor (Document/Folder)
-        for f in feat.features():
-            nm = getattr(f, "name", None) or ""
-            walk_features(f, parents + [nm], out)
-    except Exception:
-        # Si es Placemark
-        name = getattr(feat, "name", None) or ""
-        geom = getattr(feat, "geometry", None)
-        out.append({"path": parents, "name": name, "geom": geom, "raw": feat})
+def tag_eq(el, short):
+    """Compara tag ignorando namespace."""
+    if el is None or el.tag is None:
+        return False
+    if el.tag.endswith("}"+short):
+        return True
+    # sin namespace
+    return el.tag == short
 
-def is_layer(path_or_name, layer_key):
-    """True si en la ruta o nombre aparece el texto de capa (case-insensitive)."""
-    all_names = [str(x).upper() for x in (path_or_name if isinstance(path_or_name, list) else [path_or_name])]
-    return any(layer_key in n for n in all_names)
+def text_of(el):
+    return (el.text or "").strip() if el is not None else ""
 
-def extract_lines_from_geom(geom):
-    """Devuelve lista de LineString (lon,lat) desde geometrías varias."""
-    lines = []
-    if geom is None:
-        return lines
-    try:
-        if isinstance(geom, LineString):
-            lines.append(geom)
-        elif isinstance(geom, MultiLineString):
-            lines.extend(list(geom.geoms))
-        elif isinstance(geom, GeometryCollection):
-            for g in geom.geoms:
-                lines.extend(extract_lines_from_geom(g))
-        elif isinstance(geom, (Polygon, MultiPolygon)):
-            # borde exterior como línea
-            if isinstance(geom, Polygon):
-                lines.append(LineString(geom.exterior.coords))
-            else:
-                for g in geom.geoms:
-                    lines.append(LineString(g.exterior.coords))
-    except Exception:
-        pass
-    return lines
+def parse_coordinates_string(coord_text):
+    """
+    KML coordinates: "lon,lat[,alt] lon,lat[,alt] ..."
+    Devuelve (lons[], lats[])
+    """
+    lons, lats = [], []
+    if not coord_text:
+        return lons, lats
+    # separa por espacios y nuevos renglones
+    for tup in coord_text.replace("\n", " ").replace("\t", " ").split():
+        parts = tup.split(",")
+        if len(parts) >= 2:
+            try:
+                lon = float(parts[0]); lat = float(parts[1])
+                lons.append(lon); lats.append(lat)
+            except Exception:
+                continue
+    return lons, lats
 
-def parse_gx_tracks(kml_text_bytes):
-    """Fallback: extrae <gx:Track> como líneas (por si fastkml no las mapea)."""
-    try:
-        ns = {
-            "kml": "http://www.opengis.net/kml/2.2",
-            "gx": "http://www.google.com/kml/ext/2.2"
-        }
-        root = ET.fromstring(kml_text_bytes)
-        tracks = []
-        for pm in root.findall(".//kml:Placemark", ns):
-            path_names = []
-            # reconstruir ruta (sube a padres buscando <Folder><name>)
-            parent = pm
-            while True:
-                parent = parent.getparent() if hasattr(parent, "getparent") else None
-                if parent is None:
-                    break
+def extract_geometries_from_placemark(pm):
+    """
+    Devuelve lista de dicts con geometría desde un Placemark.
+    Cada item: {"type": "line"|"point", "lon": [...], "lat": [...]}  (para point, listas de 1)
+    Soporta: LineString, Point, MultiGeometry, gx:Track
+    """
+    geoms = []
 
-            # leer nombres ascendentes (si no hay lxml, omitimos ruta)
-            # extraer gx:coord ó gx:Track/gx:coord
-            coords = []
-            for coord in pm.findall(".//gx:coord", ns):
-                parts = coord.text.strip().split()
-                if len(parts) >= 2:
-                    lon, lat = float(parts[0]), float(parts[1])
-                    coords.append((lon, lat))
-            if len(coords) >= 2:
-                tracks.append({"path": [], "name": (pm.findtext("kml:name", default="", namespaces=ns) or ""), "coords": coords})
-        return tracks
-    except Exception:
-        return []
+    # 1) LineString
+    for ls in pm.findall(".//{*}LineString"):
+        coords_el = ls.find(".//{*}coordinates")
+        lons, lats = parse_coordinates_string(text_of(coords_el))
+        if len(lons) >= 2:
+            geoms.append({"type": "line", "lon": lons, "lat": lats})
 
-def decide_layer(record):
-    """Determina a qué capa FTTH pertenece un placemark por su ruta/nombre."""
-    path = [p.upper() for p in record["path"]]
-    nm = (record["name"] or "").upper()
+    # 2) Point
+    for pt in pm.findall(".//{*}Point"):
+        coords_el = pt.find(".//{*}coordinates")
+        lons, lats = parse_coordinates_string(text_of(coords_el))
+        if len(lons) >= 1:
+            geoms.append({"type": "point", "lon": [lons[0]], "lat": [lats[0]]})
+
+    # 3) gx:Track (coords en <gx:coord> "lon lat alt")
+    for tr in pm.findall(".//{"+NS["gx"]+"}Track"):
+        lons, lats = [], []
+        for c in tr.findall(".//{"+NS["gx"]+"}coord"):
+            parts = text_of(c).split()
+            if len(parts) >= 2:
+                try:
+                    lon = float(parts[0]); lat = float(parts[1])
+                    lons.append(lon); lats.append(lat)
+                except Exception:
+                    continue
+        if len(lons) >= 2:
+            geoms.append({"type": "line", "lon": lons, "lat": lats})
+
+    # 4) Polygons → usar borde exterior
+    for poly in pm.findall(".//{*}Polygon"):
+        outer = poly.find(".//{*}outerBoundaryIs/{*}LinearRing/{*}coordinates")
+        lons, lats = parse_coordinates_string(text_of(outer))
+        if len(lons) >= 2:
+            geoms.append({"type": "line", "lon": lons, "lat": lats})
+
+    # MultiGeometry ya está cubierto por los finds anteriores (buscan recursivo)
+    return geoms
+
+def walk_folder(el, path, out_list):
+    """
+    Recorre Document/Folder/Placemark y acumula:
+      {"path": [...], "name": <placemark_name>, "geoms": [ ... ] }
+    """
+    if tag_eq(el, "Document") or tag_eq(el, "Folder"):
+        name_el = el.find("{*}name")
+        name = text_of(name_el)
+        new_path = path + [name] if name else path
+        # hijos
+        for child in list(el):
+            if tag_eq(child, "Folder") or tag_eq(child, "Document"):
+                walk_folder(child, new_path, out_list)
+            elif tag_eq(child, "Placemark"):
+                pm_name = text_of(child.find("{*}name"))
+                geoms = extract_geometries_from_placemark(child)
+                if geoms:
+                    out_list.append({"path": new_path, "name": pm_name, "geoms": geoms})
+            # otros nodos: ignorar
+    elif tag_eq(el, "Placemark"):
+        pm_name = text_of(el.find("{*}name"))
+        geoms = extract_geometries_from_placemark(el)
+        if geoms:
+            out_list.append({"path": path, "name": pm_name, "geoms": geoms})
+
+def classify_layer(path, name):
+    up = [p.upper() for p in path] + [(name or "").upper()]
     for key in LINE_LAYERS + POINT_LAYERS:
-        if is_layer(path, key) or key in nm:
+        if any(key in s for s in up):
             return key
     return None
 
-# --- app ---
+# ----------------------------
+# App
+# ----------------------------
+uploaded = st.file_uploader("📂 Subí tu archivo FTTH (.KMZ / .KML)", type=["kmz", "kml"])
+
 if uploaded:
-    kml_bytes = read_kml_text(uploaded)
+    kml_bytes = get_kml_bytes(uploaded)
     if not kml_bytes:
-        st.error("❌ No se pudo leer el KML dentro del archivo.")
+        st.error("❌ No se pudo extraer el KML del archivo.")
         st.stop()
 
-    # 1) Parsear con fastkml
-    k = kml.KML()
-    k.from_string(kml_bytes)
-    placemarks = []
-    for doc in k.features():
-        walk_features(doc, [getattr(doc, "name", "")], placemarks)
+    # Parse XML
+    try:
+        root = ET.fromstring(kml_bytes)
+    except Exception as e:
+        st.error(f"❌ Error al parsear XML KML: {e}")
+        st.stop()
 
-    # 2) Clasificar y extraer
-    line_geoms = {key: [] for key in LINE_LAYERS}
-    point_geoms = {key: [] for key in POINT_LAYERS}
+    # Recolectar placemarks con sus rutas
+    placemarks = []
+    walk_folder(root, [], placemarks)
+
+    # Clasificar y separar
+    lines = {k: [] for k in LINE_LAYERS}
+    points = {k: [] for k in POINT_LAYERS}
 
     for rec in placemarks:
-        layer = decide_layer(rec)
+        layer = classify_layer(rec["path"], rec["name"])
         if not layer:
             continue
-        geom = rec["geom"]
+        for g in rec["geoms"]:
+            if g["type"] == "line" and layer in LINE_LAYERS:
+                if g["lon"] and g["lat"]:
+                    lines[layer].append((g["lon"], g["lat"]))
+            elif g["type"] == "point" and layer in POINT_LAYERS:
+                points[layer].append((g["lon"][0], g["lat"][0]))
 
-        if layer in LINE_LAYERS:
-            for ls in extract_lines_from_geom(geom):
-                try:
-                    lon, lat = list(ls.xy[0]), list(ls.xy[1])
-                    if len(lon) >= 2 and len(lat) >= 2:
-                        line_geoms[layer].append((lon, lat))
-                except Exception:
-                    continue
-        elif layer in POINT_LAYERS:
-            try:
-                if isinstance(geom, Point):
-                    point_geoms[layer].append((geom.x, geom.y))
-            except Exception:
-                continue
+    # Debug rápido
+    st.write("**Capas detectadas:**",
+             {**{f"{k}_lineas": len(v) for k, v in lines.items()},
+              **{f"{k}_puntos": len(v) for k, v in points.items()}})
 
-    # 3) Fallback: si no hubo líneas, intentar gx:Track en bruto
-    if all(len(v) == 0 for v in line_geoms.values()):
-        tracks = parse_gx_tracks(kml_bytes)
-        # intentamos mapear por nombre
-        for tr in tracks:
-            nm = tr["name"].upper()
-            mapped = next((key for key in LINE_LAYERS if key in nm), None)
-            if not mapped:
-                continue
-            lon = [p[0] for p in tr["coords"]]
-            lat = [p[1] for p in tr["coords"]]
-            if len(lon) >= 2:
-                line_geoms[mapped].append((lon, lat))
-
-    # --- Reporte de capas detectadas
-    st.write("**Resumen capas detectadas:**")
-    st.write({k: len(v) for k, v in line_geoms.items()} | {k: len(v) for k, v in point_geoms.items()})
-
-    # 4) Construir mapa
+    # Construir mapa
     fig = go.Figure()
     all_lat, all_lon = [], []
 
     # Líneas
     for layer in LINE_LAYERS:
-        color = LINE_COLORS[layer]
-        for lon, lat in line_geoms[layer]:
+        for lon, lat in lines[layer]:
             if not lon or not lat:
                 continue
             all_lat.extend(lat); all_lon.extend(lon)
             fig.add_trace(go.Scattermapbox(
                 lon=lon, lat=lat, mode="lines",
-                line=dict(width=3, color=color),
+                line=dict(width=3, color=LINE_COLORS[layer]),
                 name=layer
             ))
 
-    # Puntos
+    # Puntos + NAP coords para clientes
     nap_coords = []
     for layer in POINT_LAYERS:
-        pts = point_geoms[layer]
+        pts = points[layer]
         if not pts:
             continue
         lons = [p[0] for p in pts]
         lats = [p[1] for p in pts]
         all_lat.extend(lats); all_lon.extend(lons)
+
         style = POINT_STYLE[layer]
         fig.add_trace(go.Scattermapbox(
             lon=lons, lat=lats, mode="markers",
@@ -235,7 +253,7 @@ if uploaded:
             text=[f"{p} dBm" for p in cl_pwr]
         ))
 
-    # Centro y estilo
+    # Centrar y mostrar
     if all_lat and all_lon:
         fig.update_layout(
             mapbox=dict(
@@ -245,8 +263,7 @@ if uploaded:
             ),
             margin={"r":0,"t":0,"l":0,"b":0}
         )
-
     st.plotly_chart(fig, use_container_width=True)
 
 else:
-    st.info("Subí tu archivo FTTH (.KMZ / .KML) con carpetas: TRONCAL, DERIV, PRECO, HUB, NAP, FOSC, NODOS.")
+    st.info("Subí tu archivo FTTH con carpetas: TRONCAL, DERIV, PRECO, HUB, NAP, FOSC, NODOS.")
