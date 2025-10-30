@@ -1,5 +1,6 @@
 import streamlit as st
 import plotly.graph_objects as go
+import pandas as pd
 import tempfile, zipfile, os, xmltodict, random
 
 st.set_page_config(page_title="Dashboard Ingeniería FTTH", layout="wide")
@@ -102,13 +103,29 @@ if uploaded_file:
     lon_c = sum(p[0] for p in coords_all) / len(coords_all)
     lat_c = sum(p[1] for p in coords_all) / len(coords_all)
 
-    # ---- SIMULACIÓN CLIENTES ----
+    # ---- SIMULACIÓN DE CLIENTES ----
+    hubs = [h["name"] for h in capas["HUB"]] if capas["HUB"] else ["HUB 1"]
+    naps = [n["name"] for n in capas["NAP"]] if capas["NAP"] else ["NAP 1"]
+
     clientes = []
     for nap in capas["NAP"]:
-        for (x, y) in nap["coords"]:
-            for _ in range(4):
-                clientes.append((x + random.uniform(-0.0002, 0.0002),
-                                 y + random.uniform(-0.0002, 0.0002)))
+        if not nap.get("coords"):
+            continue
+        (x, y) = nap["coords"][0]
+        hub_asignado = random.choice(hubs) if hubs else "HUB 1"
+        for _ in range(random.randint(4, 8)):
+            cx = x + random.uniform(-0.0002, 0.0002)
+            cy = y + random.uniform(-0.0002, 0.0002)
+            pot = round(random.uniform(-25, -17), 2)
+            clientes.append({
+                "HUB": hub_asignado,
+                "NAP": nap["name"],
+                "x": cx,
+                "y": cy,
+                "Potencia (dBm)": pot
+            })
+
+    df_clientes = pd.DataFrame(clientes)
 
     # ---- MAPA ----
     fig = go.Figure()
@@ -117,7 +134,7 @@ if uploaded_file:
         "HUB": "blue", "NAP": "magenta", "FOSC": "yellow", "NODOS": "gray"
     }
 
-    # ---- LÍNEAS ----
+    # Líneas
     for tipo in ["TRONCAL", "DERIVACION", "PRECON"]:
         segs = capas.get(tipo, [])
         if not segs:
@@ -136,7 +153,7 @@ if uploaded_file:
                 name=tipo
             ))
 
-    # ---- PUNTOS ----
+    # Puntos
     for tipo in ["HUB", "NAP", "FOSC", "NODOS"]:
         puntos = capas.get(tipo, [])
         if not puntos:
@@ -155,13 +172,14 @@ if uploaded_file:
                 name=tipo
             ))
 
-    # ---- CLIENTES ----
-    if clientes:
-        lon, lat = zip(*clientes)
+    # Clientes
+    if not df_clientes.empty:
         fig.add_trace(go.Scattermapbox(
-            lon=lon, lat=lat, mode="markers",
+            lon=df_clientes["x"], lat=df_clientes["y"],
+            mode="markers",
             marker=dict(size=4, color="lime"),
-            name="Clientes Simulados", visible="legendonly"
+            name="Clientes Simulados",
+            visible="legendonly"
         ))
 
     fig.update_layout(
@@ -172,4 +190,28 @@ if uploaded_file:
 
     st.plotly_chart(fig, use_container_width=True)
 
+    # ---- ANÁLISIS INFERIOR ----
+    st.subheader("📊 Indicadores de Clientes por HUB y NAP")
 
+    if not df_clientes.empty:
+        resumen = df_clientes.groupby(["HUB", "NAP"]).size().reset_index(name="Clientes")
+        st.dataframe(resumen, use_container_width=True)
+
+        # Cantidad de clientes por HUB
+        resumen_hub = df_clientes.groupby("HUB").size().reset_index(name="Total Clientes")
+        fig_bar = go.Figure(go.Bar(
+            x=resumen_hub["HUB"], y=resumen_hub["Total Clientes"], marker_color="#00cc83"
+        ))
+        fig_bar.update_layout(title="Cantidad de Clientes por HUB", yaxis_title="Clientes", height=300)
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+        # Potencias
+        fig_pot = go.Figure()
+        for hub in df_clientes["HUB"].unique():
+            df_h = df_clientes[df_clientes["HUB"] == hub]
+            fig_pot.add_trace(go.Box(
+                y=df_h["Potencia (dBm)"], name=hub,
+                boxpoints="all", jitter=0.3, whiskerwidth=0.2, marker_size=4
+            ))
+        fig_pot.update_layout(title="Distribución de Potencias por HUB", yaxis_title="Potencia (dBm)", height=300)
+        st.plotly_chart(fig_pot, use_container_width=True)
