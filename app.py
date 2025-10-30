@@ -173,28 +173,29 @@ if uploaded_file:
     }
 
     for tipo in ["HUB", "NAP", "FOSC", "NODOS"]:
-        if capas[tipo] and tipo in simbolos:
+        if capas.get(tipo):
             lon, lat, nombres = [], [], []
             for seg in capas[tipo]:
-                if seg and "coords" in seg and len(seg["coords"]) >= 1:
+                if seg and seg.get("coords"):
                     lon.append(seg["coords"][0][0])
                     lat.append(seg["coords"][0][1])
                     nombres.append(seg.get("name", f"{tipo}_{len(nombres)+1}"))
 
-            fig.add_trace(go.Scattermapbox(
-                lon=lon, lat=lat,
-                mode="markers+text" if tipo == "HUB" else "markers",
-                text=nombres if tipo == "HUB" else None,
-                textposition="top right",
-                marker=dict(
-                    size=tamaños.get(tipo, 10),
-                    color=colores.get(tipo, "white"),
-                    symbol=simbolos.get(tipo, "circle"),
-                    line=dict(width=1, color="white")
-                ),
-                name=tipo,
-                hoverinfo="text",
-            ))
+            if lon and lat:
+                fig.add_trace(go.Scattermapbox(
+                    lon=lon, lat=lat,
+                    mode="markers+text" if tipo == "HUB" else "markers",
+                    text=nombres if tipo == "HUB" else None,
+                    textposition="top right",
+                    marker=dict(
+                        size=tamaños.get(tipo, 10),
+                        color=colores.get(tipo, "white"),
+                        symbol=simbolos.get(tipo, "circle"),
+                        line=dict(width=1, color="white")
+                    ),
+                    name=tipo,
+                    hoverinfo="text",
+                ))
 
     # === CLIENTES ===
     if clientes:
