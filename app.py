@@ -1,140 +1,292 @@
 import streamlit as st
-import pydeck as pdk
 import numpy as np
 import pandas as pd
+import pydeck as pdk
 from zipfile import ZipFile
 from io import BytesIO
 import xml.etree.ElementTree as ET
+import math
 
 st.set_page_config(page_title="Dashboard Ingeniería FTTH", layout="wide")
 st.title("📶 Dashboard Ingeniería FTTH")
-st.caption("Visualización de trazas, HUB, NAP, FOSC, NODOS y clientes simulados")
+st.caption("Trazas (TRONCAL/DERIV/PRECO), HUB/NAP/FOSC/NODOS y clientes simulados")
 
+# ----------------------------
+# Config
+# ----------------------------
 LINE_LAYERS = ["TRONCAL", "DERIV", "PRECO"]
-POINT_LAYERS = ["HUB", "NAP", "FOSC", "NODOS"]
-LINE_COLORS = {"TRONCAL": [255, 0, 0], "DERIV": [0, 255, 0], "PRECO": [150, 0, 255]}
-POINT_COLORS = {"HUB": [0, 100, 255], "NAP": [255, 0, 0], "FOSC": [0, 0, 0], "NODOS": [255, 255, 0]}
+POINT_LAYERS = ["HUB", "NAP", "FOSC", "NODOS", "NODO"]  # incluir singular
 
-# --- Funciones auxiliares ---
+# Colores RGBA para PyDeck
+LINE_COLORS = {"TRONCAL": [255, 0, 0, 200], "DERIV": [0, 180, 0, 200], "PRECO": [150, 0, 255, 200]}
+POINT_COLORS = {"HUB": [0, 120, 255, 220], "NAP": [255, 0, 0, 220], "FOSC": [0, 0, 0, 220], "NODOS": [255, 200, 0, 220], "NODO": [255, 200, 0, 220]}
+CLIENT_COLOR = [200, 200, 200, 180]
+
+NS = {"kml": "http://www.opengis.net/kml/2.2", "gx": "http://www.google.com/kml/ext/2.2"}
+
+# Mapeo de sinónimos para clasificar
+def normalize_layer(name_or_path_upper: str):
+    s = name_or_path_upper
+    if "TRONCAL" in s or "TRONC" in s:
+        return "TRONCAL"
+    if "DERIVACION" in s or "DERIV." in s or "DERIV" in s:
+        return "DERIV"
+    if "PRECO" in s or "PRECON" in s or "PRECONEX" in s or "PRECONNEC" in s or "PRECONECTOR" in s:
+        return "PRECO"
+    if "HUB" in s:
+        return "HUB"
+    if "NAP" in s:
+        return "NAP"
+    if "FOSC" in s:
+        return "FOSC"
+    if "NODOS" in s or "NODO" in s:
+        return "NODOS"
+    return None
+
+# ----------------------------
+# Utilidades
+# ----------------------------
 def extract_kml_bytes(uploaded_file):
-    """Extrae el contenido XML del archivo .kml o .kmz."""
     raw = uploaded_file.read()
     uploaded_file.seek(0)
     if uploaded_file.name.lower().endswith(".kmz"):
         with ZipFile(BytesIO(raw)) as z:
-            kml_name = next((n for n in z.namelist() if n.endswith(".kml")), None)
+            # prioriza doc.kml; si no, el primero que encuentre
+            kml_name = next((n for n in z.namelist() if n.endswith("doc.kml")), None)
+            if not kml_name:
+                kml_name = next((n for n in z.namelist() if n.lower().endswith(".kml")), None)
             if not kml_name:
                 return None
             return z.read(kml_name)
     return raw
 
 def parse_coordinates_string(coord_text):
-    """Convierte texto de coordenadas en lista de tuplas (lat, lon)."""
+    """
+    KML: "lon,lat[,alt] lon,lat[,alt] ..."
+    Devuelve lista de pares [lon, lat] (orden que espera PyDeck).
+    """
     coords = []
     if not coord_text:
         return coords
-    for tup in coord_text.replace("\n", " ").split():
+    for tup in coord_text.replace("\n", " ").replace("\t", " ").split():
         parts = tup.split(",")
         if len(parts) >= 2:
             try:
-                lon, lat = float(parts[0]), float(parts[1])
-                coords.append((lat, lon))
-            except:
+                lon = float(parts[0]); lat = float(parts[1])
+                coords.append([lon, lat])
+            except Exception:
                 pass
     return coords
 
-def extract_from_kml(kml_bytes):
-    """Extrae Placemarks del archivo KML."""
-    root = ET.fromstring(kml_bytes)
-    placemarks = []
-    for pm in root.findall(".//{*}Placemark"):
-        name = (pm.findtext(".//{*}name") or "").upper()
-        coords = []
-        geom_type = None
-        for ls in pm.findall(".//{*}LineString"):
-            coord_text = ls.findtext(".//{*}coordinates")
-            coords = parse_coordinates_string(coord_text)
-            geom_type = "line"
-        for pt in pm.findall(".//{*}Point"):
-            coord_text = pt.findtext(".//{*}coordinates")
-            coords = parse_coordinates_string(coord_text)
-            geom_type = "point"
-        if coords:
-            placemarks.append({"name": name, "geom_type": geom_type, "coords": coords})
-    return placemarks
+def extract_geoms_from_placemark(pm):
+    """
+    Extrae todas las geometrías de un Placemark:
+      - LineString -> path (lista [lon,lat])
+      - Polygon (borde exterior) -> path
+      - gx:Track -> path
+      - Point -> punto [lon,lat]
+    Devuelve lista de dicts: {"type": "line"/"point", "coords": [[lon,lat], ...]}
+    """
+    geoms = []
 
-# --- App principal ---
+    # LineString
+    for ls in pm.findall(".//{*}LineString"):
+        txt = (ls.findtext(".//{*}coordinates") or "").strip()
+        path = parse_coordinates_string(txt)
+        if len(path) >= 2:
+            geoms.append({"type": "line", "coords": path})
+
+    # Polygon (outer boundary)
+    for poly in pm.findall(".//{*}Polygon"):
+        outer = poly.find(".//{*}outerBoundaryIs/{*}LinearRing/{*}coordinates")
+        txt = outer.text.strip() if outer is not None and outer.text else ""
+        path = parse_coordinates_string(txt)
+        if len(path) >= 2:
+            geoms.append({"type": "line", "coords": path})
+
+    # gx:Track
+    for tr in pm.findall(".//{"+NS["gx"]+"}Track"):
+        path = []
+        for c in tr.findall(".//{"+NS["gx"]+"}coord"):
+            parts = (c.text or "").strip().split()
+            if len(parts) >= 2:
+                try:
+                    lon = float(parts[0]); lat = float(parts[1])
+                    path.append([lon, lat])
+                except Exception:
+                    pass
+        if len(path) >= 2:
+            geoms.append({"type": "line", "coords": path})
+
+    # Point
+    for pt in pm.findall(".//{*}Point"):
+        txt = (pt.findtext(".//{*}coordinates") or "").strip()
+        pts = parse_coordinates_string(txt)
+        if pts:
+            geoms.append({"type": "point", "coords": [pts[0]]})
+
+    return geoms
+
+def walk_kml(el, path_names, collector):
+    """
+    Recorre Document/Folder/Placemark acumulando:
+      {"path": [nombres_de_carpetas], "name": nombre_placemark, "geoms": [...]}
+    """
+    tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+    if tag in ("Document", "Folder"):
+        nm = (el.findtext("{*}name") or "").strip()
+        new_path = path_names + [nm] if nm else path_names
+        for child in el:
+            ctag = child.tag.split("}")[-1]
+            if ctag in ("Document", "Folder"):
+                walk_kml(child, new_path, collector)
+            elif ctag == "Placemark":
+                pm_name = (child.findtext("{*}name") or "").strip()
+                geoms = extract_geoms_from_placemark(child)
+                if geoms:
+                    collector.append({"path": new_path, "name": pm_name, "geoms": geoms})
+    elif tag == "Placemark":
+        pm_name = (el.findtext("{*}name") or "").strip()
+        geoms = extract_geoms_from_placemark(el)
+        if geoms:
+            collector.append({"path": path_names, "name": pm_name, "geoms": geoms})
+
+def classify_rec(rec):
+    # Usa nombres de carpeta y del placemark para decidir capa
+    upper = " / ".join([*(p or "" for p in rec["path"]), rec["name"]]).upper()
+    return normalize_layer(upper)
+
+def haversine_m(lat1, lon1, lat2, lon2):
+    R = 6371000.0
+    φ1, λ1, φ2, λ2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    dφ = φ2 - φ1
+    dλ = λ2 - λ1
+    a = math.sin(dφ/2)**2 + math.cos(φ1)*math.cos(φ2)*math.sin(dλ/2)**2
+    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+def path_length_km(path_lonlat):
+    if len(path_lonlat) < 2:
+        return 0.0
+    total = 0.0
+    for i in range(len(path_lonlat)-1):
+        lon1, lat1 = path_lonlat[i]
+        lon2, lat2 = path_lonlat[i+1]
+        total += haversine_m(lat1, lon1, lat2, lon2)
+    return total / 1000.0
+
+# ----------------------------
+# App
+# ----------------------------
 uploaded = st.file_uploader("📂 Subí tu archivo FTTH (.KMZ / .KML)", type=["kmz", "kml"])
 
 if uploaded:
     kml_bytes = extract_kml_bytes(uploaded)
     if not kml_bytes:
-        st.error("❌ No se pudo leer el archivo.")
+        st.error("❌ No se pudo leer el KML dentro del archivo.")
         st.stop()
 
-    placemarks = extract_from_kml(kml_bytes)
-    if not placemarks:
-        st.error("❌ No se detectaron geometrías en el archivo.")
+    try:
+        root = ET.fromstring(kml_bytes)
+    except Exception as e:
+        st.error(f"❌ Error al parsear el XML: {e}")
         st.stop()
 
-    # Clasificación
-    lines, points = [], []
-    for pm in placemarks:
-        name = pm["name"]
-        if any(k in name for k in LINE_LAYERS):
-            layer = next(k for k in LINE_LAYERS if k in name)
-            color = LINE_COLORS[layer]
-            coords = pm["coords"]
-            for i in range(len(coords) - 1):
-                lines.append({
-                    "layer": layer,
-                    "color": color,
-                    "from": [coords[i][1], coords[i][0]],   # lon, lat
-                    "to": [coords[i + 1][1], coords[i + 1][0]]
-                })
-        elif any(k in name for k in POINT_LAYERS):
-            layer = next(k for k in POINT_LAYERS if k in name)
-            color = POINT_COLORS[layer]
-            lat, lon = coords[0]
-            points.append({"layer": layer, "color": color, "lat": lat, "lon": lon})
+    # Recolectar placemarks
+    recs = []
+    walk_kml(root, [], recs)
 
-    # DataFrames con columnas garantizadas
-    df_lines = pd.DataFrame(lines, columns=["layer", "color", "from", "to"])
-    df_points = pd.DataFrame(points, columns=["layer", "color", "lat", "lon"])
+    # Clasificar y separar paths/puntos
+    # Para líneas usamos PathLayer con 'path' = [[lon,lat], ...]
+    path_rows = []  # dict(layer,color,path)
+    point_rows = [] # dict(layer,color,lon,lat)
+    path_count = {"TRONCAL":0, "DERIV":0, "PRECO":0}
+    point_count = {"HUB":0, "NAP":0, "FOSC":0, "NODOS":0}
 
-    # --- Clientes simulados cerca de las NAP ---
-    clientes = []
-    if not df_points.empty and "NAP" in df_points["layer"].values:
-        nap_points = df_points[df_points["layer"] == "NAP"]
+    for rec in recs:
+        layer = classify_rec(rec)
+        if not layer:
+            continue
+        for g in rec["geoms"]:
+            if g["type"] == "line" and layer in LINE_COLORS:
+                # normalizar: eliminar duplicados consecutivos
+                path = []
+                prev = None
+                for pt in g["coords"]:
+                    if prev is None or pt != prev:
+                        path.append(pt)
+                        prev = pt
+                if len(path) >= 2:
+                    path_rows.append({"layer": layer, "color": LINE_COLORS[layer], "path": path})
+                    path_count[layer] += 1
+            elif g["type"] == "point" and (layer in POINT_COLORS or layer == "NODO"):
+                # mapear NODO a NODOS
+                mapped = "NODOS" if layer == "NODO" else layer
+                lon, lat = g["coords"][0]
+                point_rows.append({"layer": mapped, "color": POINT_COLORS[mapped], "lon": lon, "lat": lat})
+                if mapped in point_count:
+                    point_count[mapped] += 1
+
+    df_paths = pd.DataFrame(path_rows, columns=["layer", "color", "path"])
+    df_points = pd.DataFrame(point_rows, columns=["layer", "color", "lon", "lat"])
+
+    # ---- Clientes simulados alrededor de NAP ----
+    clientes_rows = []
+    if not df_points.empty and ("NAP" in df_points["layer"].unique()):
         rng = np.random.default_rng()
-        for _, row in nap_points.iterrows():
-            for _ in range(rng.integers(3, 8)):
-                clientes.append({
-                    "lat": row.lat + rng.uniform(-0.0005, 0.0005),
-                    "lon": row.lon + rng.uniform(-0.0005, 0.0005),
-                    "color": [200, 200, 200],
-                    "pot": f"{rng.uniform(-25, -17):.2f} dBm"
-                })
-    df_clientes = pd.DataFrame(clientes, columns=["lat", "lon", "color", "pot"])
+        naps = df_points[df_points["layer"] == "NAP"][["lat","lon"]].to_numpy()
+        for lat, lon in naps:
+            n = int(rng.integers(3, 8))
+            dlat = rng.uniform(-0.0005, 0.0005, n)
+            dlon = rng.uniform(-0.0005, 0.0005, n)
+            pots = np.round(rng.uniform(-25.0, -17.0, n), 2)
+            for i in range(n):
+                clientes_rows.append({"lat": lat + dlat[i], "lon": lon + dlon[i], "color": CLIENT_COLOR, "pot": f"{pots[i]} dBm"})
+    df_clientes = pd.DataFrame(clientes_rows, columns=["lat","lon","color","pot"])
 
-    # --- Capas PyDeck ---
+    # ---- KPIs ----
+    total_km = 0.0
+    if not df_paths.empty:
+        for _, r in df_paths.iterrows():
+            total_km += path_length_km(r["path"])
+    total_km = round(total_km, 2)
+    total_troncal = int(path_count["TRONCAL"])
+    total_deriv = int(path_count["DERIV"])
+    total_preco = int(path_count["PRECO"])
+    total_hub = int(point_count["HUB"])
+    total_nap = int(point_count["NAP"])
+    total_fosc = int(point_count["FOSC"])
+    total_nodos = int(point_count["NODOS"])
+    total_clientes = int(len(df_clientes))
+
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+    c1.metric("🧵 Longitud total red", f"{total_km} km")
+    c2.metric("🔴 Troncales", total_troncal)
+    c3.metric("🟢 Derivaciones", total_deriv)
+    c4.metric("🟣 Preconect.", total_preco)
+    c5.metric("🔷 HUB", total_hub)
+    c6.metric("🔺 NAP", total_nap)
+    c7.metric("👥 Clientes sim.", total_clientes)
+    st.divider()
+
+    # ---- Capas PyDeck ----
     layers = []
 
-    if not df_lines.empty:
+    if not df_paths.empty:
         layers.append(pdk.Layer(
-            "LineLayer",
-            data=df_lines,
-            get_source_position="from",
-            get_target_position="to",
+            "PathLayer",
+            data=df_paths,
+            get_path="path",            # lista de [lon,lat]
             get_color="color",
+            width_scale=1,
             get_width=4,
+            pickable=True,
         ))
 
     if not df_points.empty:
         layers.append(pdk.Layer(
             "ScatterplotLayer",
             data=df_points,
-            get_position='[lon, lat]',
+            get_position='[lon, lat]',  # lon, lat
             get_color="color",
             get_radius=8,
             pickable=True,
@@ -151,15 +303,18 @@ if uploaded:
             get_tooltip="pot",
         ))
 
-    # --- Centrado automático ---
+    # ---- Centro y zoom ----
     if not df_points.empty:
-        lat_center = df_points["lat"].mean()
-        lon_center = df_points["lon"].mean()
-    elif not df_lines.empty:
-        all_coords = np.array([pt for seg in df_lines["from"].tolist() + df_lines["to"].tolist()])
-        lat_center, lon_center = np.mean(all_coords[:, 1]), np.mean(all_coords[:, 0])
+        lat_center = float(df_points["lat"].mean())
+        lon_center = float(df_points["lon"].mean())
+    elif not df_paths.empty:
+        # promedio de todas las coordenadas de todos los paths
+        all_pts = np.vstack([np.array(p) for p in df_paths["path"].tolist()])  # shape (N,2) -> [lon, lat]
+        lon_center = float(all_pts[:,0].mean())
+        lat_center = float(all_pts[:,1].mean())
     else:
-        lat_center, lon_center = -35.47, -69.57  # fallback
+        # fallback Mendoza aprox
+        lat_center, lon_center = -32.89, -68.85
 
     view_state = pdk.ViewState(latitude=lat_center, longitude=lon_center, zoom=13)
     tooltip = {"html": "<b>{layer}</b>", "style": {"backgroundColor": "white"}}
@@ -167,4 +322,4 @@ if uploaded:
     st.pydeck_chart(pdk.Deck(layers=layers, initial_view_state=view_state, tooltip=tooltip))
 
 else:
-    st.info("Subí un archivo FTTH (.KMZ / .KML) con carpetas: TRONCAL, DERIV, PRECO, HUB, NAP, FOSC, NODOS.")
+    st.info("Subí un archivo FTTH (.KMZ / .KML) con carpetas/nombres: TRONCAL, DERIV/DERIVACION, PRECO/PRECON..., HUB, NAP, FOSC, NODO/NODOS.")
