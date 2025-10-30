@@ -8,25 +8,29 @@ from zipfile import ZipFile
 import tempfile
 import os
 import fiona
-from shapely.geometry import LineString, MultiLineString, GeometryCollection
+from shapely.geometry import (
+    LineString, MultiLineString, GeometryCollection,
+    Polygon, MultiPolygon
+)
 
 # -------------------------------
-# CONFIG
+# CONFIGURACIÓN INICIAL
 # -------------------------------
 st.set_page_config(page_title="Dashboard Ingeniería FTTH", layout="wide")
 st.title("📶 Dashboard Ingeniería FTTH")
 st.markdown("**Visualización del tendido, HUB, NAP, FOSC, NODOS y clientes simulados**")
 
 # -------------------------------
-# FUNCIONES
+# FUNCIONES AUXILIARES
 # -------------------------------
 def leer_kmz(uploaded_file):
-    """Lee todas las capas de un KMZ/KML, incluyendo geometrías complejas."""
+    """Lee todas las capas del KMZ/KML y devuelve un GeoDataFrame combinado."""
     with tempfile.TemporaryDirectory() as tmpdir:
         path = os.path.join(tmpdir, uploaded_file.name)
         with open(path, "wb") as f:
             f.write(uploaded_file.getvalue())
 
+        # Descomprimir si es KMZ
         if uploaded_file.name.endswith(".kmz"):
             with ZipFile(path, "r") as zip_ref:
                 zip_ref.extractall(tmpdir)
@@ -50,7 +54,7 @@ def leer_kmz(uploaded_file):
 
 
 def extraer_lineas(geom):
-    """Devuelve una lista de LineString válidas desde geometrías mixtas."""
+    """Devuelve LineString válidos desde geometrías mixtas (Polygon, Multi, etc.)."""
     lineas = []
     if geom is None or geom.is_empty:
         return lineas
@@ -59,6 +63,13 @@ def extraer_lineas(geom):
             lineas.append(geom)
         elif isinstance(geom, MultiLineString):
             lineas.extend(list(geom.geoms))
+        elif isinstance(geom, (Polygon, MultiPolygon)):
+            # Convertir el borde exterior del polígono en línea
+            if isinstance(geom, Polygon):
+                lineas.append(LineString(geom.exterior.coords))
+            else:
+                for g in geom.geoms:
+                    lineas.append(LineString(g.exterior.coords))
         elif isinstance(geom, GeometryCollection):
             for g in geom.geoms:
                 lineas.extend(extraer_lineas(g))
@@ -68,14 +79,14 @@ def extraer_lineas(geom):
 
 
 # -------------------------------
-# APP
+# APLICACIÓN
 # -------------------------------
 uploaded_file = st.file_uploader("📂 Subí el archivo FTTH (.KMZ o .KML)", type=["kmz", "kml"])
 
 if uploaded_file:
     gdf = leer_kmz(uploaded_file)
     if gdf is None or gdf.empty:
-        st.error("❌ No se encontraron geometrías válidas.")
+        st.error("❌ No se encontraron geometrías válidas en el archivo.")
         st.stop()
 
     st.success(f"✅ Archivo {uploaded_file.name} cargado correctamente.")
@@ -87,12 +98,7 @@ if uploaded_file:
 
     # Colores definidos
     color_lineas = {"TRONCAL": "red", "DERIV": "green", "PRECO": "violet"}
-    color_puntos = {
-        "HUB": "blue",
-        "NAP": "red",
-        "FOSC": "black",
-        "NODOS": "yellow"
-    }
+    color_puntos = {"HUB": "blue", "NAP": "red", "FOSC": "black", "NODOS": "yellow"}
 
     # --- DIBUJAR LÍNEAS ---
     for tipo in ["TRONCAL", "DERIV", "PRECO"]:
@@ -109,7 +115,9 @@ if uploaded_file:
                     all_lat.extend(lat)
                     all_lon.extend(lon)
                     map_fig.add_trace(go.Scattermapbox(
-                        lon=lon, lat=lat, mode="lines",
+                        lon=lon,
+                        lat=lat,
+                        mode="lines",
                         line=dict(width=3, color=color_lineas.get(tipo, "gray")),
                         name=tipo
                     ))
@@ -132,11 +140,18 @@ if uploaded_file:
             continue
         all_lat.extend(subset["lat"])
         all_lon.extend(subset["lon"])
+
+        # Forma de símbolo (simplificada)
+        symbol = "circle" if tipo == "HUB" else ("triangle-up" if tipo == "NAP" else "square")
         map_fig.add_trace(go.Scattermapbox(
             lat=subset["lat"],
             lon=subset["lon"],
             mode="markers",
-            marker=dict(size=12, color=color_puntos[tipo]),
+            marker=dict(
+                size=12,
+                color=color_puntos[tipo],
+                symbol=symbol
+            ),
             name=tipo
         ))
         if tipo == "NAP":
@@ -158,7 +173,7 @@ if uploaded_file:
             lon=clientes_df["lon"],
             mode="markers",
             marker=dict(size=5, color="lightgray", opacity=0.7),
-            text=clientes_df["potencia"].astype(str) + " dBm",
+            text="Potencia: " + clientes_df["potencia"].astype(str) + " dBm",
             name="Clientes simulados"
         ))
 
@@ -175,4 +190,4 @@ if uploaded_file:
 
     st.plotly_chart(map_fig, use_container_width=True)
 else:
-    st.info("Subí un archivo KMZ/KML con estructura FTTH (TRONCAL, DERIV, PRECO, HUB, NAP, FOSC, NODOS).")
+    st.info("Subí un archivo KMZ o KML con estructura FTTH (TRONCAL, DERIV, PRECO, HUB, NAP, FOSC, NODOS).")
