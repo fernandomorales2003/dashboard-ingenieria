@@ -73,6 +73,7 @@ def parse_kml(kml_path):
                             except Exception:
                                 continue
 
+                            nombre_punto = str(p.get("name", "")).strip()
                             nombre_carpeta = carpeta.upper()
                             tipo = "NODOS"
                             if "TRONCAL" in nombre_carpeta: tipo = "TRONCAL"
@@ -82,7 +83,7 @@ def parse_kml(kml_path):
                             elif "NAP" in nombre_carpeta: tipo = "NAP"
                             elif "FOSC" in nombre_carpeta: tipo = "FOSC"
 
-                            capas[tipo].append(coords)
+                            capas[tipo].append({"coords": coords, "name": nombre_punto})
 
                 elif isinstance(value, (dict, list)):
                     buscar(value, carpeta)
@@ -99,7 +100,7 @@ if uploaded_file:
         st.stop()
 
     capas = parse_kml(kml_path)
-    all_coords = [pt for lista in capas.values() for seg in lista for pt in seg]
+    all_coords = [pt for lista in capas.values() for seg in lista for pt in seg["coords"]]
 
     if not all_coords:
         st.warning("⚠️ No se encontraron coordenadas válidas.")
@@ -110,10 +111,9 @@ if uploaded_file:
     lat_center = sum(p[1] for p in all_coords) / len(all_coords)
 
     # Simular clientes cerca de NAPs
-    naps = capas["NAP"]
     clientes, potencias = [], []
-    for nap in naps:
-        for (x, y) in nap:
+    for nap in capas["NAP"]:
+        for (x, y) in nap["coords"]:
             for _ in range(random.randint(3, 6)):
                 cx, cy = x + random.uniform(-0.00025, 0.00025), y + random.uniform(-0.00025, 0.00025)
                 clientes.append([cx, cy])
@@ -145,9 +145,10 @@ if uploaded_file:
     for tipo in ["TRONCAL", "DERIVACION", "PRECON"]:
         all_lon, all_lat = [], []
         for seg in capas[tipo]:
-            if len(seg) > 1:
-                lon, lat = zip(*seg)
-                all_lon += [None] + list(lon)  # None separa segmentos
+            coords = seg["coords"]
+            if len(coords) > 1:
+                lon, lat = zip(*coords)
+                all_lon += [None] + list(lon)
                 all_lat += [None] + list(lat)
         if all_lon:
             fig.add_trace(go.Scattermapbox(
@@ -157,16 +158,35 @@ if uploaded_file:
                 hoverinfo="none",
             ))
 
-    # === AGRUPAMOS PUNTOS ===
+    # === AGRUPAMOS PUNTOS (con símbolos y nombres) ===
     for tipo in ["HUB", "NAP", "FOSC", "NODOS"]:
         if capas[tipo]:
-            lon = [p[0][0] for p in capas[tipo]]
-            lat = [p[0][1] for p in capas[tipo]]
+            lon, lat, nombres = [], [], []
+            for seg in capas[tipo]:
+                if len(seg["coords"]) >= 1:
+                    lon.append(seg["coords"][0][0])
+                    lat.append(seg["coords"][0][1])
+                    nombres.append(seg["name"] if seg["name"] else f"{tipo}_{len(nombres)+1}")
+
+            simbolo = "circle"
+            tamaño = 10
+            if tipo == "HUB":
+                simbolo = "diamond"
+                tamaño = 14
+            elif tipo == "NAP":
+                simbolo = "triangle-up"
+                tamaño = 12
+            elif tipo == "NODOS":
+                simbolo = "square"
+                tamaño = 10
+
             fig.add_trace(go.Scattermapbox(
-                lon=lon, lat=lat, mode="markers",
-                marker=dict(size=10, color=colores[tipo], symbol="circle"),
+                lon=lon, lat=lat, mode="markers+text",
+                text=nombres if tipo == "HUB" else None,
+                textposition="top right",
+                marker=dict(size=tamaño, color=colores[tipo], symbol=simbolo),
                 name=tipo,
-                hoverinfo="none",
+                hoverinfo="text",
             ))
 
     # === CLIENTES SIMULADOS (INICIAN OCULTOS) ===
@@ -178,7 +198,7 @@ if uploaded_file:
             text=[f"{p} dBm" for p in potencias],
             name="Clientes (Simulados)",
             hoverinfo="text",
-            visible="legendonly",  # 🔹 Ocultos por defecto
+            visible="legendonly",
         ))
 
     # === CONFIG MAPA ===
