@@ -3,14 +3,16 @@ import pandas as pd
 import plotly.graph_objects as go
 import tempfile, zipfile, os, xmltodict, random
 
+# ---------- CONFIGURACIÓN ----------
 st.set_page_config(page_title="Dashboard Ingeniería FTTH", layout="wide")
 st.title("📡 Dashboard Ingeniería FTTH")
-st.markdown("Subí tu archivo `.kmz`, `.kml` o `.rtf` para visualizar el plano de ingeniería con sus troncales, derivaciones, HUB, NAP, etc.")
+st.markdown("Subí tu archivo `.kmz`, `.kml` o `.rtf` para visualizar el plano de ingeniería FTTH.")
 
 uploaded_file = st.file_uploader("📁 Subir archivo", type=["kmz", "kml", "rtf"])
 
+# ---------- EXTRACCIÓN DEL KML ----------
 def extract_kml(uploaded_file):
-    """Extrae el texto KML desde KMZ, KML o RTF"""
+    """Extrae el texto KML desde KMZ, KML o RTF."""
     temp = tempfile.NamedTemporaryFile(delete=False)
     temp.write(uploaded_file.read())
     temp.flush()
@@ -26,7 +28,6 @@ def extract_kml(uploaded_file):
     elif uploaded_file.name.endswith(".kml"):
         return path
     elif uploaded_file.name.endswith(".rtf"):
-        # Extraer el contenido KML desde un RTF exportado
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
         start = content.find("<kml")
@@ -39,90 +40,100 @@ def extract_kml(uploaded_file):
             return kml_path
     return None
 
+# ---------- PARSEO DEL KML ----------
 def parse_kml(kml_path):
-    """Lee el KML y clasifica coordenadas por capa"""
+    """Lee el KML y clasifica coordenadas por capa, tolerando estructuras anidadas."""
     with open(kml_path, "r", encoding="utf-8") as f:
-        kml_dict = xmltodict.parse(f.read())
+        content = f.read()
 
-    capas = {"TRONCALES": [], "DERIVACION": [], "PRECON": [], "HUB": [], "NAP": [], "FOSC": [], "NODOS": []}
+    try:
+        kml_dict = xmltodict.parse(content)
+    except Exception:
+        st.error("No se pudo interpretar el KML. Verificá que esté bien formado.")
+        return {k: [] for k in ["TRONCALES", "DERIVACION", "PRECON", "HUB", "NAP", "FOSC", "NODOS"]}
 
-    def recorrer(node, current_folder=None):
-        if isinstance(node, dict):
-            if "Folder" in node:
-                folders = node["Folder"] if isinstance(node["Folder"], list) else [node["Folder"]]
-                for f in folders:
-                    nombre = f.get("name", "").upper()
-                    recorrer(f, nombre)
-            if "Placemark" in node:
-                placemarks = node["Placemark"] if isinstance(node["Placemark"], list) else [node["Placemark"]]
-                for p in placemarks:
-                    coords = None
-                    if "LineString" in p and "coordinates" in p["LineString"]:
-                        coords = p["LineString"]["coordinates"]
-                        tipo = current_folder or "TRONCALES"
-                    elif "Point" in p and "coordinates" in p["Point"]:
-                        coords = p["Point"]["coordinates"]
-                        tipo = current_folder or "NODOS"
-                    else:
-                        continue
+    capas = {k: [] for k in ["TRONCALES", "DERIVACION", "PRECON", "HUB", "NAP", "FOSC", "NODOS"]}
 
-                    # Normalizar coordenadas
-                    if coords:
-                        coords = [list(map(float, c.split(",")[:2])) for c in coords.strip().split()]
-                        if tipo:
-                            tipo_key = next((k for k in capas.keys() if k in tipo.upper()), None)
-                            if tipo_key:
-                                capas[tipo_key].append(coords)
+    def buscar_placemarks(nodo, carpeta_actual=""):
+        if isinstance(nodo, dict):
+            for key, value in nodo.items():
+                if key == "Folder":
+                    folders = value if isinstance(value, list) else [value]
+                    for f in folders:
+                        nombre = str(f.get("name", "")).upper()
+                        buscar_placemarks(f, carpeta_actual=nombre)
+                elif key == "Placemark":
+                    placemarks = value if isinstance(value, list) else [value]
+                    for p in placemarks:
+                        tipo = carpeta_actual.upper()
+                        coords_text = None
 
-    recorrer(kml_dict)
+                        if isinstance(p, dict):
+                            if "LineString" in p and "coordinates" in p["LineString"]:
+                                coords_text = p["LineString"]["coordinates"]
+                            elif "Point" in p and "coordinates" in p["Point"]:
+                                coords_text = p["Point"]["coordinates"]
+
+                        if coords_text:
+                            try:
+                                coords = [list(map(float, c.split(",")[:2])) for c in coords_text.strip().split()]
+                            except Exception:
+                                continue
+                            tipo_key = next((k for k in capas if k in tipo), "NODOS")
+                            capas[tipo_key].append(coords)
+
+                elif isinstance(value, (dict, list)):
+                    buscar_placemarks(value, carpeta_actual)
+
+    buscar_placemarks(kml_dict)
     return capas
 
+# ---------- PROCESAMIENTO PRINCIPAL ----------
 if uploaded_file:
     kml_path = extract_kml(uploaded_file)
     if not kml_path:
-        st.error("No se pudo extraer el KML del archivo.")
+        st.error("❌ No se pudo extraer el KML del archivo.")
         st.stop()
 
     capas = parse_kml(kml_path)
+
     all_coords = [pt for lista in capas.values() for seg in lista for pt in seg]
     if not all_coords:
-        st.error("No se encontraron coordenadas válidas en el archivo.")
+        st.warning("⚠️ No se encontraron coordenadas válidas en el archivo.")
+        st.info("Verificá que el archivo contenga carpetas con coordenadas (ej: TRONCALES, DERIVACION, NAP, HUB...).")
+        st.json({k: len(v) for k, v in capas.items()})  # diagnóstico rápido
         st.stop()
 
     lon_center = sum(p[0] for p in all_coords) / len(all_coords)
     lat_center = sum(p[1] for p in all_coords) / len(all_coords)
 
-    # Simular NAP y clientes
+    # Simular NAPs y clientes
     naps = capas["NAP"]
-    if naps:
-        clientes = []
-        potencias = []
-        for nap in naps:
-            for (x, y) in nap:
-                for _ in range(random.randint(3, 8)):
-                    cx = x + random.uniform(-0.0002, 0.0002)
-                    cy = y + random.uniform(-0.0002, 0.0002)
-                    clientes.append([cx, cy])
-                    potencias.append(round(random.uniform(-25, -17), 2))
-    else:
-        clientes, potencias = [], []
+    clientes, potencias = [], []
+    for nap in naps:
+        for (x, y) in nap:
+            for _ in range(random.randint(3, 8)):
+                cx = x + random.uniform(-0.00025, 0.00025)
+                cy = y + random.uniform(-0.00025, 0.00025)
+                clientes.append([cx, cy])
+                potencias.append(round(random.uniform(-25, -17), 2))
 
-    # ---- Resumen Superior ----
+    # ---------- MÉTRICAS SUPERIORES ----------
     c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
     c1.metric("Troncales", len(capas["TRONCALES"]))
     c2.metric("Derivaciones", len(capas["DERIVACION"]))
-    c3.metric("Precon", len(capas["PRECON"]))
+    c3.metric("Preconectorizado", len(capas["PRECON"]))
     c4.metric("HUB", len(capas["HUB"]))
     c5.metric("NAP", len(capas["NAP"]))
     c6.metric("FOSC", len(capas["FOSC"]))
     c7.metric("Clientes", len(clientes))
 
-    # ---- Crear mapa ----
+    # ---------- MAPA ----------
     fig = go.Figure()
 
     colores = {
         "TRONCALES": "red",
-        "DERIVACION": "orange",
+        "DERIVACION": "green",
         "PRECON": "purple",
         "HUB": "blue",
         "NAP": "violet",
@@ -141,7 +152,7 @@ if uploaded_file:
                     name=tipo
                 ))
 
-    # Puntos
+    # Puntos (HUB, NAP, FOSC, NODOS)
     for tipo in ["HUB", "NAP", "FOSC", "NODOS"]:
         if capas[tipo]:
             lon = [p[0][0] for p in capas[tipo]]
@@ -164,7 +175,7 @@ if uploaded_file:
 
     fig.update_layout(
         mapbox=dict(
-            style="carto-darkmatter",
+            style="carto-darkmatter",  # Fondo oscuro
             center=dict(lat=lat_center, lon=lon_center),
             zoom=13
         ),
@@ -174,4 +185,3 @@ if uploaded_file:
     )
 
     st.plotly_chart(fig, use_container_width=True)
-
