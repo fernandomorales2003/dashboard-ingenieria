@@ -89,14 +89,13 @@ def leer_kmz_multi(uploaded_file):
             return None
 
         all_layers = []
-        # leer todas las capas dentro del KML
         for layer_name in fiona.listlayers(kml_files[0]):
             try:
                 gdf_layer = gpd.read_file(kml_files[0], driver="KML", layer=layer_name)
                 if not gdf_layer.empty:
                     all_layers.append(gdf_layer)
-            except Exception as e:
-                print(f"No se pudo leer la capa {layer_name}: {e}")
+            except Exception:
+                continue
 
         if all_layers:
             return pd.concat(all_layers, ignore_index=True)
@@ -138,25 +137,45 @@ if uploaded_file:
             geom = row.geometry
             if geom is None:
                 continue
-            if geom.geom_type == "LineString":
-                all_lines.append(geom)
-            elif geom.geom_type == "MultiLineString":
-                all_lines.extend(list(geom.geoms))
-            elif geom.geom_type == "GeometryCollection":
-                for g in geom.geoms:
-                    if g.geom_type == "LineString":
-                        all_lines.append(g)
+            try:
+                if geom.geom_type == "LineString" and not geom.is_empty:
+                    all_lines.append(geom)
+                elif geom.geom_type == "MultiLineString":
+                    for g in geom.geoms:
+                        if not g.is_empty:
+                            all_lines.append(g)
+                elif geom.geom_type == "GeometryCollection":
+                    for g in geom.geoms:
+                        if g.geom_type == "LineString" and not g.is_empty:
+                            all_lines.append(g)
+            except Exception:
+                continue
 
         if all_lines:
+            lats, lons = [], []
             for line in all_lines:
-                lon, lat = line.xy
-                map_fig.add_trace(go.Scattermapbox(
-                    lon=lon,
-                    lat=lat,
-                    mode="lines",
-                    line=dict(width=3, color="#00cc83"),
-                    name="Tendido FO"
-                ))
+                try:
+                    lon, lat = line.xy
+                    lats.extend(lat)
+                    lons.extend(lon)
+                    if len(lon) > 0 and len(lat) > 0:
+                        map_fig.add_trace(go.Scattermapbox(
+                            lon=lon,
+                            lat=lat,
+                            mode="lines",
+                            line=dict(width=3, color="#00cc83"),
+                            name="Tendido FO"
+                        ))
+                except Exception:
+                    continue
+
+            # 🔍 Centramos el mapa en el área del tendido
+            if lats and lons:
+                lat_center = np.mean(lats)
+                lon_center = np.mean(lons)
+                map_fig.update_layout(
+                    mapbox=dict(center=dict(lat=lat_center, lon=lon_center), zoom=14)
+                )
         else:
             st.warning("⚠️ No se detectaron líneas válidas en ninguna capa del archivo.")
     else:
